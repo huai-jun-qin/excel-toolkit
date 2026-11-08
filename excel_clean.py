@@ -240,23 +240,41 @@ def main():
     ap.add_argument("--dedupe", action="store_true", help="drop exact duplicate rows")
     ap.add_argument("--dedupe-on", nargs="*", default=None, help="compare only these columns")
     ap.add_argument("--keep-empty-rows", action="store_true", help="keep fully empty rows")
+    ap.add_argument("--max-log", type=int, default=MAX_LOG_ROWS,
+                    help="cap the _log sheet at N rows (default %d). Truncation is reported, "
+                         "never silent." % MAX_LOG_ROWS)
     args = ap.parse_args()
 
     src = os.path.abspath(args.src)
     if not os.path.exists(src):
         sys.exit("Not found: %s" % src)
     if os.path.splitext(src)[1].lower() == ".xls":
-        sys.exit("Old .xls is not supported. Re-save as .xlsx first.")
-
-    wb_in = load_workbook(src, data_only=True)
-    if args.sheet:
-        if args.sheet not in wb_in.sheetnames:
-            sys.exit("No such sheet: %s (have: %s)" % (args.sheet, ", ".join(wb_in.sheetnames)))
-        ws_in = wb_in[args.sheet]
+        # legacy .xls: reuse the reader that excel_merge.py already ships (needs xlrd)
+        try:
+            from excel_merge import read_xls_sheets
+        except ImportError:
+            sys.exit("excel_merge.py must sit next to excel_clean.py to read .xls "
+                     "(or run excel_merge.py first — it writes a .xlsx)")
+        sheets = list(read_xls_sheets(src))
+        if not sheets:
+            sys.exit("This .xls has no sheets: %s" % src)
+        names = [n for n, _ in sheets]
+        if args.sheet and args.sheet not in names:
+            sys.exit("No such sheet: %s (have: %s)" % (args.sheet, ", ".join(names)))
+        sheet_title, table = next((n, t) for n, t in sheets if not args.sheet or n == args.sheet)
+        if not table:
+            sys.exit("Sheet is empty: nothing to clean.")
     else:
-        ws_in = wb_in.worksheets[0]
+        wb_in = load_workbook(src, data_only=True)
+        if args.sheet:
+            if args.sheet not in wb_in.sheetnames:
+                sys.exit("No such sheet: %s (have: %s)" % (args.sheet, ", ".join(wb_in.sheetnames)))
+            ws_in = wb_in[args.sheet]
+        else:
+            ws_in = wb_in.worksheets[0]
+        sheet_title = ws_in.title
+        table = [list(r) for r in ws_in.iter_rows(values_only=True)]
 
-    table = [list(r) for r in ws_in.iter_rows(values_only=True)]
     if not table:
         sys.exit("Sheet is empty: nothing to clean.")
 
@@ -286,10 +304,15 @@ def main():
     body = [r + [None] * (ncol - len(r)) if len(r) < ncol else r[:ncol] for r in body]
 
     log = []
+    log_dropped = 0
+    cap = args.max_log
 
     def note(row_no, col, before, after, action):
-        if len(log) < MAX_LOG_ROWS:
+        nonlocal log_dropped
+        if len(log) < cap:
             log.append((row_no, col, before, after, action))
+        else:
+            log_dropped += 1
 
     for i, (raw, new) in enumerate(zip(raw_headers, headers)):
         if raw is not None and str(raw) != new:
@@ -444,6 +467,10 @@ def main():
     ls.append(["Excel row", "Column", "Before", "After", "Action"])
     for entry in log:
         ls.append(list(entry))
+    if log_dropped:
+        ls.append(["", "TRUNCATED", log_dropped, "",
+                   "log capped at %d rows - %d further changes were made but are NOT listed here"
+                   % (cap, log_dropped)])
     for letter, w in (("A", 11), ("B", 22), ("C", 30), ("D", 30), ("E", 46)):
         ls.column_dimensions[letter].width = w
 
@@ -456,13 +483,15 @@ def main():
     rows_in = len(body)
     ss.append(["Metric", "Value"])
     ss.append(["Source file", os.path.basename(src)])
-    ss.append(["Sheet", ws_in.title])
+    ss.append(["Sheet", sheet_title])
     ss.append(["Header row", hrow + 1])
     ss.append(["Rows read", rows_in])
     ss.append(["Empty rows dropped", dropped_empty])
     ss.append(["Duplicate rows dropped", len(dup_rows)])
     ss.append(["Rows written", len(out_rows)])
-    ss.append(["Cells changed", len(log)])
+    ss.append(["Cells changed", len(log) + log_dropped])
+    if log_dropped:
+        ss.append(["Change log truncated", "%d changes not listed (cap %d)" % (log_dropped, cap)])
     ss.append(["Ambiguous dates left alone", ambiguous])
     ss.append(["Reconciliation",
                "OK" if rows_in - dropped_empty - len(dup_rows) == len(out_rows) else "MISMATCH"])
@@ -482,15 +511,19 @@ def main():
 
     # ---- console ----
     print("=" * 68)
-    print("Source          : %s  [%s]" % (os.path.basename(src), ws_in.title))
+    print("Source          : %s  [%s]" % (os.path.basename(src), sheet_title))
     print("Header row      : %d" % (hrow + 1))
     print("Rows read       : %d" % rows_in)
     print("Empty dropped   : %d" % dropped_empty)
     print("Duplicate drop  : %d" % len(dup_rows))
     print("Rows written    : %d" % len(out_rows))
-    print("Cells changed   : %d" % len(log))
+    print("Cells changed   : %d" % (len(log) + log_dropped))
     print("Reconcile       : %s" % ("OK" if rows_in - dropped_empty - len(dup_rows) == len(out_rows)
                                    else "MISMATCH"))
+    if log_dropped:
+        print("!! LOG TRUNCATED: %d changes not listed (cap %d). "
+              "Re-run with --max-log %d to list them all."
+              % (log_dropped, cap, len(log) + log_dropped))
     if ambiguous:
         print("Ambiguous dates : %d left untouched (see _log)" % ambiguous)
     print("-" * 68)
