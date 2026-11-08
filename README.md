@@ -28,14 +28,19 @@ alone and flagged, not guessed at.
 ## Requirements
 
 - Python 3.8+
-- `openpyxl`
+- `openpyxl` (required)
+- `xlrd` (optional — only needed to read legacy Excel 97-2003 `.xls` files)
 
 ```bash
 pip install openpyxl
+pip install xlrd      # optional: adds .xls support
 ```
 
 Tested on macOS and Windows with Python 3.9–3.13. No pandas, no compiled
 dependencies, no internet access needed.
+
+Without `xlrd` the tools do not crash on `.xls` — that file is skipped with a
+one-line reason and everything else still merges.
 
 ---
 
@@ -59,11 +64,16 @@ output always goes to a new file.
 
 ## 1. `excel_merge.py`
 
-Merge every `.xlsx` / `.xlsm` / `.csv` in a folder into a single sheet.
+Merge every `.xlsx` / `.xlsm` / `.xls` / `.csv` in a folder into a single sheet.
 
 ```bash
 python3 excel_merge.py --src ./invoices --out all_invoices.xlsx --preview
 ```
+
+Legacy `.xls` (Excel 97-2003) is read directly when `xlrd` is installed, including
+real date cells — they come through as dates, not as serial numbers like `46118`.
+That matters more than it sounds: half of the ERP exports small businesses still
+produce are `.xls`.
 
 | Flag | What it does |
 |---|---|
@@ -208,8 +218,10 @@ equal rows written — the tool says so itself on the `_report` sheet.
 come through as their last calculated value. This is a data-extraction tool, not an
 editor — run it on exports, not on your live model.
 
-**`.xls`?** Not supported by `openpyxl`. The tool says so explicitly instead of
-failing with a stack trace: re-save as `.xlsx` first.
+**`.xls`?** Supported directly, as long as `xlrd` is installed (`pip install xlrd`).
+The `.xls` in `samples/dirty` is a deliberately fake one — a text file renamed to
+`.xls` — to prove the tool reports a bad file instead of dying. A real legacy file
+lives in `samples/legacy/legacy_export.xls` if you want to see the working path.
 
 **Files with passwords, merged cells, or pivot caches?** Merged cells are read as
 "value in the top-left, blanks elsewhere". Password-protected workbooks are not

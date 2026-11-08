@@ -10,7 +10,8 @@ Every kind of mess a real client's folder contains is planted on purpose:
   - IDs with leading zeros that must survive: "00123"
   - trailing spaces, non-breaking spaces, full-width characters
   - blank rows, duplicate rows, and a sheet whose header starts on row 3
-  - one .csv, one unreadable .xls, one corrupt file
+  - one .csv, one fake .xls (to prove errors are reported), one corrupt file
+  - samples/legacy/: a real .xls, so .xls support can be checked end to end
 
 Run:  python3 make_test_data.py
 """
@@ -124,7 +125,60 @@ def main():
     print("dirty test set -> %s" % OUT)
     for n in sorted(os.listdir(OUT)):
         print("  %-20s %d bytes" % (n, os.path.getsize(os.path.join(OUT, n))))
-    print("\nExpected outcome: merge reports the .xls + broken.xlsx as FAILED and still merges the rest.")
+
+    build_legacy_xls()
+
+    print("\nExpected outcome: merge reports the fake .xls + broken.xlsx as FAILED and still merges the rest.")
+    print("The real .xls in samples/legacy must merge cleanly, dates included.")
+
+
+def build_legacy_xls():
+    """A genuine Excel 97-2003 file, to prove .xls is read and dates survive.
+
+    Needs xlwt (write-only, used here just to generate the sample).
+    """
+    try:
+        import xlwt
+    except ImportError:
+        print("\nsamples/legacy skipped: pip install xlwt   (only needed to build this sample)")
+        return
+
+    out_dir = os.path.join(HERE, "samples", "legacy")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "legacy_export.xls")
+
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Sheet1")
+    # a title line above the header - the classic ERP export shape
+    ws.write(0, 0, "Exported from the old ERP system - do not edit")
+    for c, h in enumerate(["订单号", "客户名称", "日期", "金额", "数量", "地区"]):
+        ws.write(2, c, h)
+
+    dstyle = xlwt.XFStyle(); dstyle.num_format_str = "YYYY-MM-DD"
+    mstyle = xlwt.XFStyle(); mstyle.num_format_str = "#,##0.00"
+
+    rows = [
+        ("00123", "张三", datetime(2026, 3, 5), 1234.5, 3, "华东"),   # real date cell
+        ("00124", "李四", "2026/4/6", "1,200.50", 2, "华南"),          # text date + text amount
+        ("00125", "Wang Wu", "05.03.2026", "¥ 88 元", "5", "North"),
+        ("00126", "赵六", datetime(2026, 6, 7), 300, 1, "华东"),
+    ]
+    for i, (oid, name, dt, amt, qty, region) in enumerate(rows, start=3):
+        ws.write(i, 0, oid)
+        ws.write(i, 1, name)
+        if isinstance(dt, datetime):
+            ws.write(i, 2, dt, dstyle)
+        else:
+            ws.write(i, 2, dt)
+        if isinstance(amt, (int, float)):
+            ws.write(i, 3, amt, mstyle)
+        else:
+            ws.write(i, 3, amt)
+        ws.write(i, 4, qty)
+        ws.write(i, 5, region)
+
+    wb.save(path)
+    print("\nlegacy .xls -> %s  (%d bytes)" % (path, os.path.getsize(path)))
 
 
 if __name__ == "__main__":

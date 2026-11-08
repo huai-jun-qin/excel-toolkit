@@ -8,6 +8,7 @@ If a date says "2026/3/5" in one file and "05.03.2026" in another,
 you get both, exactly as they were. Fixing them is excel_clean.py's job.
 
 Requires: openpyxl  (pip install openpyxl)
+Optional: xlrd      (pip install xlrd)   -- only needed to read legacy .xls files
 
 Usage:
     python3 excel_merge.py --src ./invoices
@@ -111,6 +112,77 @@ def read_csv(path):
     raise IOError("cannot decode CSV: %s" % path)
 
 
+def _xls_cell_value(cell, datemode):
+    """Convert one xlrd cell into a plain Python value (str / int / float / datetime)."""
+    import xlrd
+    t, v = cell.ctype, cell.value
+    if t in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+        return None
+    if t == xlrd.XL_CELL_DATE:
+        try:
+            return xlrd.xldate.xldate_as_datetime(v, datemode)
+        except Exception:
+            return v
+    if t == xlrd.XL_CELL_BOOLEAN:
+        return bool(v)
+    if t == xlrd.XL_CELL_NUMBER:
+        return int(v) if float(v).is_integer() else v
+    if t == xlrd.XL_CELL_ERROR:
+        return None
+    return v
+
+
+def read_xls_sheets(path):
+    """Yield (sheet_name, 2D table) for a legacy .xls workbook. Needs xlrd."""
+    try:
+        import xlrd
+    except ImportError:
+        raise RuntimeError(
+            "读旧版 .xls 需要 xlrd：pip install xlrd　"
+            "（或先用 Excel/WPS 打开后『另存为 .xlsx』再跑）"
+        )
+    try:
+        book = xlrd.open_workbook(path, on_demand=True)
+    except Exception as e:
+        raise RuntimeError("这个 .xls 打不开（可能不是真正的 Excel 97-2003 文件）：%s" % e)
+    try:
+        for sh in book.sheets():
+            table = [[_xls_cell_value(sh.cell(r, c), book.datemode) for c in range(sh.ncols)]
+                     for r in range(sh.nrows)]
+            yield sh.name, table
+    finally:
+        try:
+            book.release_resources()
+        except Exception:
+            pass
+
+
+def iter_xls(path, sheet_opt, all_sheets, header_row=None):
+    """Yield (sheet_label, headers, data_rows) for a legacy .xls file."""
+    sheets = list(read_xls_sheets(path))
+    if not sheets:
+        return
+    if sheet_opt:
+        picked = [(n, t) for n, t in sheets if n == sheet_opt]
+        if not picked:
+            raise RuntimeError("这个文件里没有名为 '%s' 的工作表（有：%s）"
+                               % (sheet_opt, ", ".join(n for n, _ in sheets)))
+    elif all_sheets:
+        picked = sheets
+    else:
+        # same rule as .xlsx: first sheet that actually has more than a header row
+        picked = [sheets[0]]
+        for n, t in sheets:
+            if sum(1 for r in t if not is_blank_row(r)) > 1:
+                picked = [(n, t)]
+                break
+    for name, table in picked:
+        headers, rows = pick_header(table, header_row)
+        if headers is None:
+            continue
+        yield name, headers, rows
+
+
 def row_width(r):
     n = 0
     for v in r:
@@ -174,10 +246,8 @@ def iter_sheets(path, sheet_opt, all_sheets, header_row=None):
         return
 
     if ext == ".xls":
-        raise RuntimeError(
-            "旧版 .xls 不支持（openpyxl 只能读 .xlsx）。"
-            "请用 Excel/WPS 打开后『另存为 .xlsx』再跑一遍。"
-        )
+        yield from iter_xls(path, sheet_opt, all_sheets, header_row)
+        return
 
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
