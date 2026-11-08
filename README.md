@@ -175,7 +175,7 @@ python3 excel_split.py --src all.xlsx --chunk 500                 # 500 rows per
 
 | Flag | What it does |
 |---|---|
-| `--src FILE` | input `.xlsx` (required) |
+| `--src FILE` | input `.xlsx` / `.xlsm` / legacy `.xls` (required) |
 | `--by COL` | column name or 1-based index to group by |
 | `--chunk N` | split into blocks of N rows instead |
 | `--mode files\|sheets` | separate workbooks, or sheets inside one workbook |
@@ -224,10 +224,11 @@ into a GUI, so file size stops being a reason to do it by hand.
 come through as their last calculated value. This is a data-extraction tool, not an
 editor — run it on exports, not on your live model.
 
-**`.xls`?** Supported directly, as long as `xlrd` is installed (`pip install xlrd`).
-The `.xls` in `samples/dirty` is a deliberately fake one — a text file renamed to
-`.xls` — to prove the tool reports a bad file instead of dying. A real legacy file
-lives in `samples/legacy/legacy_export.xls` if you want to see the working path.
+**`.xls`?** Supported directly across all three tools (merge, clean, split), as long
+as `xlrd` is installed (`pip install xlrd`). The `.xls` in `samples/dirty` is a
+deliberately fake one — a text file renamed to `.xls` — to prove the tool reports a
+bad file instead of dying. A real legacy file lives in
+`samples/legacy/legacy_export.xls` if you want to see the working path.
 
 **Files with passwords, merged cells, or pivot caches?** Merged cells are read as
 "value in the top-left, blanks elsewhere". Password-protected workbooks are not

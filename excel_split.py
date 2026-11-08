@@ -8,6 +8,7 @@ Two modes:
     --mode sheets  one sheet per group, all inside a single .xlsx
 
 Requires: openpyxl  (pip install openpyxl)
+Optional: xlrd      (pip install xlrd)   -- only needed to read legacy .xls files
 
 Usage:
     python3 excel_split.py --src all.xlsx --by Region
@@ -26,6 +27,77 @@ try:
     from openpyxl.utils import get_column_letter
 except ImportError:
     sys.exit("Missing dependency. Run:  pip install openpyxl")
+
+
+def _xls_cell_value(cell, datemode):
+    """Convert one xlrd cell into a plain Python value (str / int / float / datetime)."""
+    import xlrd
+    t, v = cell.ctype, cell.value
+    if t in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+        return None
+    if t == xlrd.XL_CELL_DATE:
+        try:
+            return xlrd.xldate.xldate_as_datetime(v, datemode)
+        except Exception:
+            return v
+    if t == xlrd.XL_CELL_BOOLEAN:
+        return bool(v)
+    if t == xlrd.XL_CELL_NUMBER:
+        return int(v) if float(v).is_integer() else v
+    if t == xlrd.XL_CELL_ERROR:
+        return None
+    return v
+
+
+def load_table(src, sheet_opt):
+    """Read a single sheet into a 2D list of plain values, from .xlsx or legacy .xls.
+
+    Returns (sheet_title, table). Raises RuntimeError with a readable message.
+    """
+    ext = os.path.splitext(src)[1].lower()
+    if ext == ".xls":
+        try:
+            import xlrd
+        except ImportError:
+            raise RuntimeError(
+                "读旧版 .xls 需要 xlrd：pip install xlrd　"
+                "（或先用 Excel/WPS 打开后『另存为 .xlsx』再跑）"
+            )
+        try:
+            book = xlrd.open_workbook(src, on_demand=True)
+        except Exception as e:
+            raise RuntimeError("这个 .xls 打不开（可能不是真正的 Excel 97-2003 文件）：%s" % e)
+        try:
+            sheets = book.sheets()
+            if sheet_opt:
+                names = [sh.name for sh in sheets]
+                if sheet_opt not in names:
+                    raise RuntimeError("没有名为 '%s' 的工作表（有：%s）"
+                                       % (sheet_opt, ", ".join(names)))
+                sh = next(s for s in sheets if s.name == sheet_opt)
+            else:
+                sh = sheets[0]
+            table = [[_xls_cell_value(sh.cell(r, c), book.datemode) for c in range(sh.ncols)]
+                     for r in range(sh.nrows)]
+            return sh.name, table
+        finally:
+            try:
+                book.release_resources()
+            except Exception:
+                pass
+
+    wb_in = load_workbook(src, data_only=True)
+    try:
+        if sheet_opt:
+            if sheet_opt not in wb_in.sheetnames:
+                raise RuntimeError("No such sheet: %s (have: %s)"
+                                   % (sheet_opt, ", ".join(wb_in.sheetnames)))
+            ws_in = wb_in[sheet_opt]
+        else:
+            ws_in = wb_in.worksheets[0]
+        return ws_in.title, [list(r) for r in ws_in.iter_rows(values_only=True)]
+    finally:
+        wb_in.close()
 
 ILLEGAL = re.compile(r'[\\/:*?"<>|\r\n\t]')
 
@@ -104,18 +176,15 @@ def main():
     src = os.path.abspath(args.src)
     if not os.path.exists(src):
         sys.exit("Not found: %s" % src)
-    if os.path.splitext(src)[1].lower() != ".xlsx":
-        sys.exit("Only .xlsx is supported. Re-save the file as .xlsx first.")
+    ext = os.path.splitext(src)[1].lower()
+    if ext not in (".xlsx", ".xlsm", ".xls"):
+        sys.exit("Only .xlsx / .xlsm / .xls are supported.")
 
-    wb_in = load_workbook(src, data_only=True)
-    if args.sheet:
-        if args.sheet not in wb_in.sheetnames:
-            sys.exit("No such sheet: %s (have: %s)" % (args.sheet, ", ".join(wb_in.sheetnames)))
-        ws_in = wb_in[args.sheet]
-    else:
-        ws_in = wb_in.worksheets[0]
+    try:
+        _, table = load_table(src, args.sheet)
+    except RuntimeError as e:
+        sys.exit(str(e))
 
-    table = [list(r) for r in ws_in.iter_rows(values_only=True)]
     if not table:
         sys.exit("Sheet is empty.")
 
