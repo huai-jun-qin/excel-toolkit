@@ -24,7 +24,7 @@ import re
 import sys
 import unicodedata
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 try:
     from openpyxl import Workbook, load_workbook
@@ -217,10 +217,47 @@ def row_width(r):
     return n
 
 
-def auto_header_index(table, scan=10):
-    """First row in the first `scan` rows that is at least half as wide as the widest one.
+def header_score(row):
+    """How much a row looks like column labels rather than a title or a data row.
 
-    Skips the 'exported from ERP' title line that sits above real headers.
+    '姓名 | 金额 | 日期' scores high. '单位：元 | 期间：2026年1-3月' does not:
+    those are info labels (a key：value shape), not column names.
+    """
+    vals = [v for v in row if v is not None and (not isinstance(v, str) or v.strip() != "")]
+    if len(vals) < 2:
+        return -1.0
+    short = mid = numeric = shaped = 0
+    for v in vals:
+        if isinstance(v, (datetime, date, time)):
+            numeric += 1
+            continue
+        if isinstance(v, bool):
+            short += 1
+            continue
+        if isinstance(v, (int, float)):
+            numeric += 1
+            continue
+        s = str(v).strip()
+        if re.fullmatch(r"[-+]?\d+(\.\d+)?", s):
+            numeric += 1
+            continue
+        if re.search(r"[:：=]", s):
+            shaped += 1
+        if len(s) <= 8:
+            short += 1
+        elif len(s) <= 24:
+            mid += 1
+    n = float(len(vals))
+    return (short * 1.0 + mid * 0.3 - 0.8 * numeric - 0.5 * shaped) / n
+
+
+def auto_header_index(table, scan=10):
+    """Row that looks most like a header inside the first `scan` rows.
+
+    Picking "the first row at least half as wide as the widest" fails when the
+    file carries an info line (4 cells) above a 7-column header: the info line
+    wins and every column name becomes '单位：元'. Scoring the labels instead
+    keeps the real header.
     """
     head = table[:scan]
     widths = [row_width(r) for r in head]
@@ -231,10 +268,71 @@ def auto_header_index(table, scan=10):
                 return i
         return 0
     need = max(2, maxw * 0.5)
+    best_i, best_s = -1, -99.0
+    for i, r in enumerate(head):
+        if widths[i] < need:
+            continue
+        s = header_score(r)
+        if s > best_s + 0.15:
+            best_s, best_i = s, i
+    if best_i >= 0:
+        return best_i
     for i, w in enumerate(widths):
         if w >= need:
             return i
     return 0
+
+
+def _blank_row(vals):
+    return all(v is None or (isinstance(v, str) and v.strip() == "") for v in vals)
+
+
+def _cover_page(table):
+    """True for a title / instruction page - not something you can clean.
+
+    A 500-row single-column list is data, and so is a 2x2 table. Only a handful
+    of sparse rows containing a sentence count as a cover.
+    """
+    rows = [r for r in table if not _blank_row(r)]
+    if not rows:
+        return True
+    widths = [sum(1 for v in r if v is not None and (not isinstance(v, str) or v.strip()))
+              for r in rows]
+    if max(widths) <= 1:
+        return len(rows) <= 6
+    cells = sum(widths)
+    long_text = sum(1 for r in rows for v in r
+                    if isinstance(v, str) and len(v.strip()) >= 12)
+    return len(rows) <= 3 and cells <= 5 and long_text >= 1
+
+
+def choose_pair(pairs, want=None):
+    """Pick the sheet to clean and say what is being left out.
+
+    pairs: [(sheet_name, table_or_probe_rows)]. Never returns a cover page.
+    """
+    names = [n for n, _ in pairs]
+    if want:
+        if want not in names:
+            sys.exit("No such sheet: %s (have: %s)" % (want, ", ".join(names)))
+        return want, next(t for n, t in pairs if n == want)
+
+    usable = [(n, t) for n, t in pairs if t and not _cover_page(t[:30])]
+    if not usable:
+        usable = [(n, t) for n, t in pairs if t]
+    if not usable:
+        return (names[0] if names else ""), []
+
+    name, table = usable[0]
+    # cover pages are meant to be left out, so they are not worth a warning
+    left = [n for n, t in pairs
+            if n != name and not str(n).startswith("_") and not _cover_page(t[:30])]
+    if left:
+        print("NOTE: cleaning '%s' only. These sheet(s) exist and will NOT appear in the output:"
+              % name)
+        print("      " + ", ".join(left[:8]) + (" ..." if len(left) > 8 else ""))
+        print("      To combine everything first: python3 excel_merge.py --src <folder> --out all.xlsx")
+    return name, table
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +372,7 @@ def main():
         names = [n for n, _ in sheets]
         if args.sheet and args.sheet not in names:
             sys.exit("No such sheet: %s (have: %s)" % (args.sheet, ", ".join(names)))
-        sheet_title, table = next((n, t) for n, t in sheets if not args.sheet or n == args.sheet)
+        sheet_title, table = choose_pair(sheets, args.sheet)
         if not table:
             sys.exit("Sheet is empty: nothing to clean.")
     else:
@@ -283,9 +381,21 @@ def main():
             if args.sheet not in wb_in.sheetnames:
                 sys.exit("No such sheet: %s (have: %s)" % (args.sheet, ", ".join(wb_in.sheetnames)))
             ws_in = wb_in[args.sheet]
+            sheet_title = ws_in.title
         else:
-            ws_in = wb_in.worksheets[0]
-        sheet_title = ws_in.title
+            # probe ~30 rows per sheet so a cover page is not mistaken for the data.
+            # No max_row= here: passing it grows the sheet's dimensions and the
+            # follow-up full read would then report dozens of phantom blank rows.
+            probe = []
+            for w in wb_in.worksheets:
+                head = []
+                for i, r in enumerate(w.iter_rows(values_only=True)):
+                    head.append(list(r))
+                    if i >= 29:
+                        break
+                probe.append((w.title, head))
+            sheet_title, _ = choose_pair(probe, None)
+            ws_in = wb_in[sheet_title]
         table = [list(r) for r in ws_in.iter_rows(values_only=True)]
 
     if not table:

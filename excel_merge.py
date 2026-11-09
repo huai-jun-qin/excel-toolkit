@@ -285,6 +285,10 @@ def looks_like_cover(table):
     Real workbooks very often start with a cover sheet:
         A1: 2026年3月对账单      A3: 制表：李四    A4: 电话：138...
     Reading that as data silently produces one garbage row and zero real rows.
+
+    Careful with false positives: a 500-row single-column list of emails IS data,
+    and so is a 2-row 2-column table. Only a few sparse rows with a sentence in
+    them count as a cover.
     """
     rows = [r for r in table if not is_blank_row(r)]
     if not rows:
@@ -292,10 +296,7 @@ def looks_like_cover(table):
     widths = [row_width(r) for r in rows]
     maxw = max(widths)
     if maxw <= 1:
-        return True
-    if len(rows) <= 2 and maxw <= 3:
-        return True
-    # 1-3 rows, very few cells, and at least one long sentence -> cover / notes page
+        return len(rows) <= 6          # one column: a title/notes block, not a list
     cells = sum(widths)
     long_text = 0
     for r in rows:

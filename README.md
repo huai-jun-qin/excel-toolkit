@@ -185,6 +185,10 @@ python3 excel_clean.py --src dirty.xlsx --dedupe --out clean.xlsx
 - **Duplicate rows**, optional, with the dropped row numbers listed.
 - Empty cells are counted per column and reported. **They are never filled in** —
   inventing a value is not cleaning.
+- **A cover sheet above the data.** Instead of cleaning the title page, it picks the
+  first sheet that actually looks like a table. If the workbook holds several
+  sheets with data, it says so on the console and names them — cleaning writes one
+  sheet, so the rest would otherwise vanish from the output without a word.
 
 **The one thing worth reading about: ambiguous dates.**
 `05.03.2026` is either 5 March or 3 May. A careless tool picks one. This one:
@@ -225,6 +229,9 @@ File and sheet names are sanitised for Windows and macOS (`/ \ : * ? " < > |`
 replaced), long values truncated, duplicates suffixed. In `sheets` mode an
 `_index` sheet lists every group with its row count.
 
+If the workbook opens with a cover page, the split starts from the first sheet that
+is an actual table — splitting a title page by "column" has nothing to group by.
+
 ---
 
 ## Verifying it yourself
@@ -254,11 +261,12 @@ cd tools
 python3 selftest_merge.py
 ```
 
-It builds eight workbooks on the fly and asserts the output row by row: a cover
+It builds ten workbooks on the fly and asserts the output row by row: a cover
 page above the data, three months inside one file, a 4-cell `单位：元 | 期间：…`
 info line sitting above a 7-column header, the header printed twice, a sheet named
 `汇总`, a CSV with BOM and semicolons, a folder holding an instructions-only file,
-and `--first-sheet` reading exactly one month. All eight must pass; the script
+`--first-sheet` reading exactly one month, a 50-row single-column list (must stay
+data, not be mistaken for a cover), and a 2x2 table. All ten must pass; the script
 prints a diff-friendly `[PASS]/[FAIL]` line per case and exits non-zero on failure.
 
 ---

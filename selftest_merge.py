@@ -168,6 +168,32 @@ def want_no_cover_text(wb):
     return ["cover text merged: %s" % bad] if bad else []
 
 
+def single_col_list(path):
+    """500 emails in one column. This is data, not a cover page."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["邮箱"])
+    for i in range(50):
+        ws.append(["user%d@example.com" % i])
+    wb.save(path)
+
+
+def tiny_table(path):
+    """A 2x2 table. Small is not the same as a cover page."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["客户名称", "金额"])
+    ws.append(["甲", 1])
+    wb.save(path)
+
+
+def want_a1(text):
+    def check(wb):
+        got = header_a1(wb)
+        return [] if got == text else ["A1 is %r, expected %r" % (got, text)]
+    return check
+
+
 CASES = [
     ("cover page + data page", "a.xlsx", cover_and_data, 3, [], [want_header, want_no_header_row]),
     ("3 months in one file", "b.xlsx", months, 6, [], [want_months]),
@@ -177,6 +203,8 @@ CASES = [
     ("summary sheet skipped", "f.xlsx", summary_sheet, 4, [], [want_no_summary]),
     ("first-sheet mode reads 1 month", "b.xlsx", months, 2, ["--first-sheet"], [want_one_month]),
     ("instructions file adds 0 rows", None, cover_only_folder, 2, [], [want_header, want_no_cover_text]),
+    ("single-column list stays data", "g.xlsx", single_col_list, 50, [], [want_a1("邮箱")]),
+    ("2x2 table stays data", "h.xlsx", tiny_table, 1, [], [want_header]),
 ]
 
 

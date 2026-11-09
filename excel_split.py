@@ -89,7 +89,14 @@ def load_table(src, sheet_opt):
                                        % (sheet_opt, ", ".join(names)))
                 sh = next(s for s in sheets if s.name == sheet_opt)
             else:
+                # skip a cover / notes page: there is no column to split on
                 sh = sheets[0]
+                for s in sheets:
+                    head = [[_xls_cell_value(s.cell(r, c), book.datemode)
+                             for c in range(s.ncols)] for r in range(min(s.nrows, 30))]
+                    if head and not _cover_page(head):
+                        sh = s
+                        break
             table = [[_xls_cell_value(sh.cell(r, c), book.datemode) for c in range(sh.ncols)]
                      for r in range(sh.nrows)]
             return sh.name, table
@@ -107,7 +114,19 @@ def load_table(src, sheet_opt):
                                    % (sheet_opt, ", ".join(wb_in.sheetnames)))
             ws_in = wb_in[sheet_opt]
         else:
-            ws_in = wb_in.worksheets[0]
+            # first sheet that is a real table - a cover page has no column to split on
+            ws_in = None
+            for w in wb_in.worksheets:
+                head = []
+                for i, r in enumerate(w.iter_rows(values_only=True)):
+                    head.append(list(r))
+                    if i >= 29:
+                        break
+                if head and not _cover_page(head):
+                    ws_in = w
+                    break
+            if ws_in is None:
+                ws_in = wb_in.worksheets[0]
         return ws_in.title, [list(r) for r in ws_in.iter_rows(values_only=True)]
     finally:
         wb_in.close()
@@ -138,8 +157,61 @@ def row_width(r):
     return n
 
 
+def header_score(row):
+    """How much a row looks like column labels rather than a title or a data row."""
+    vals = [v for v in row if v is not None and (not isinstance(v, str) or v.strip() != "")]
+    if len(vals) < 2:
+        return -1.0
+    short = mid = numeric = shaped = 0
+    for v in vals:
+        if isinstance(v, (datetime, date)):
+            numeric += 1
+            continue
+        if isinstance(v, bool):
+            short += 1
+            continue
+        if isinstance(v, (int, float)):
+            numeric += 1
+            continue
+        s = str(v).strip()
+        if re.fullmatch(r"[-+]?\d+(\.\d+)?", s):
+            numeric += 1
+            continue
+        if re.search(r"[:：=]", s):
+            shaped += 1
+        if len(s) <= 8:
+            short += 1
+        elif len(s) <= 24:
+            mid += 1
+    n = float(len(vals))
+    return (short * 1.0 + mid * 0.3 - 0.8 * numeric - 0.5 * shaped) / n
+
+
+def _cover_page(table):
+    """True for a title / instruction page - there is nothing to split there.
+
+    A single-column list of 500 emails is data, not a cover; keep the test narrow.
+    """
+    blank = lambda r: all(v is None or (isinstance(v, str) and v.strip() == "") for v in r)
+    rows = [r for r in table if not blank(r)]
+    if not rows:
+        return True
+    widths = [sum(1 for v in r if v is not None and (not isinstance(v, str) or v.strip()))
+              for r in rows]
+    if max(widths) <= 1:
+        return len(rows) <= 6
+    cells = sum(widths)
+    long_text = sum(1 for r in rows for v in r
+                    if isinstance(v, str) and len(v.strip()) >= 12)
+    return len(rows) <= 3 and cells <= 5 and long_text >= 1
+
+
 def auto_header_index(table, scan=10):
-    """First row in the first `scan` rows that is at least half as wide as the widest one."""
+    """Row that looks most like a header - not simply the widest one.
+
+    An info line ('单位：元 | 期间：…', 4 cells) above a 7-column header is wider
+    than half the header, so width alone hands the header row to the info line.
+    """
     head = table[:scan]
     widths = [row_width(r) for r in head]
     maxw = max(widths) if widths else 0
@@ -149,6 +221,15 @@ def auto_header_index(table, scan=10):
                 return i
         return 0
     need = max(2, maxw * 0.5)
+    best_i, best_s = -1, -99.0
+    for i, r in enumerate(head):
+        if widths[i] < need:
+            continue
+        s = header_score(r)
+        if s > best_s + 0.15:
+            best_s, best_i = s, i
+    if best_i >= 0:
+        return best_i
     for i, w in enumerate(widths):
         if w >= need:
             return i
