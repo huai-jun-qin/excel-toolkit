@@ -102,8 +102,11 @@ produce are `.xls`.
 | `--out FILE` | output file (default: `merged_<timestamp>.xlsx`) |
 | `--files a.xlsx b.csv` | only these files |
 | `--sheet NAME` | read this sheet name from every workbook |
-| `--all-sheets` | read every sheet, not just the first |
+| `--all-sheets` | also read pages named like a summary (`汇总`, `Total`, `Pivot`) |
+| `--first-sheet` | read only the first data sheet per file (the old behaviour) |
+| `--skip-sheet NAME` | never read that sheet (repeatable) |
 | `--header-row N` | header is on row N (default: auto-detect) |
+| `--strict` | exit code 2 if any sheet was skipped, so a cron job notices |
 | `--alias my.json` | extend the built-in column-alias table |
 | `--no-source` | don't add `_source_file` / `_source_sheet` columns |
 | `--fuzzy 0.86` | header similarity threshold for auto-alignment |
@@ -114,8 +117,19 @@ produce are `.xls`.
 - **Different header spellings for the same column.** `Order ID`, `order_id`,
   `Order No.`, `订单号` all land in one column. Every match is reported twice:
   once on the console and once on the `_aliases` sheet, so you can audit it.
-- **A title row above the header** (`Exported from ERP — do not edit`). The tool
-  picks the first row that is at least half as wide as the widest of the first ten.
+- **A title / info line above the header.** `Exported from ERP — do not edit`, or
+  `单位：元 | 期间：2026年1-3月 | 制表：李四`. The detector scores the first ten rows
+  on how much they look like short column labels rather than data or a `key：value`
+  info line, instead of just taking the widest one.
+- **A cover sheet.** Workbooks often open with `2026年3月对账单 / 制表：李四`. That
+  page is recognised as a cover and skipped — not merged as a one-row table.
+- **Many sheets in one file.** `1月`, `2月`, `3月` in a single workbook are all read
+  by default. Previously only the first was read, so 11 of 12 months disappeared
+  without a warning.
+- **A summary sheet** (`汇总`, `合计`, `Total`, `Pivot`). Skipped by default because
+  merging it double-counts. `--all-sheets` overrides that.
+- **The header printed again inside the data** — common in one-month-per-page
+  exports. Those rows are dropped instead of landing as a `Name | Email` data row.
 - **Blank rows** in the middle of data. Counted and skipped, never shifted.
 - **Rows wider than the header.** Extra values become `未命名列_n` / `Column_n`
   instead of being thrown away.
@@ -123,13 +137,16 @@ produce are `.xls`.
   One corrupt workbook does not stop the batch.
 - **`.csv` with `;` or tab delimiters**, in UTF-8 or GBK.
 
+Nothing is skipped silently: every sheet that was not read is listed on the console
+and on the `_report` sheet under `SHEETS NOT READ`, with the reason.
+
 **What it deliberately does not do:** change values. Merge only concatenates.
 A date written `2026/3/5` in one file and `05.03.2026` in another stays that way
 until you run `excel_clean.py`. Separating "combine" from "repair" means that when
 something looks wrong you know which of the two steps did it.
 
-Output: `Merged` sheet + `_report` sheet (rows read / blank / written per file,
-with a reconciliation line) + `_aliases` sheet.
+Output: `Merged` sheet + `_report` sheet (rows read / blank / repeated header /
+written per file, with a reconciliation line that must balance) + `_aliases` sheet.
 
 ---
 
@@ -229,6 +246,20 @@ legacy `.xls`, and one corrupt file.
 
 Expected result: the two bad files are reported and the rest merge. Rows read must
 equal rows written — the tool says so itself on the `_report` sheet.
+
+The awkward shapes that break most merge scripts have their own test file:
+
+```bash
+cd tools
+python3 selftest_merge.py
+```
+
+It builds eight workbooks on the fly and asserts the output row by row: a cover
+page above the data, three months inside one file, a 4-cell `单位：元 | 期间：…`
+info line sitting above a 7-column header, the header printed twice, a sheet named
+`汇总`, a CSV with BOM and semicolons, a folder holding an instructions-only file,
+and `--first-sheet` reading exactly one month. All eight must pass; the script
+prints a diff-friendly `[PASS]/[FAIL]` line per case and exits non-zero on failure.
 
 ---
 
