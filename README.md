@@ -1,5 +1,9 @@
 # Excel Toolkit — Merge, Clean, Split (no data loss, full audit trail)
 
+> **Rather not run scripts yourself?** I do this as a service — you send the files,
+> you get back one clean workbook plus a cell-by-cell change log.
+> → [fiverr.com/claire999j](https://www.fiverr.com/claire999j)
+
 Three small command-line tools for people who get a folder of messy Excel files and
 need one clean table out of it. No GUI to click through, no "merge wizard" that
 silently drops your columns, no manual copy-paste that quietly corrupts dates.
@@ -239,6 +243,25 @@ workloads, split by month first (`--chunk`).
 
 **Something went wrong.** `MERGE_DEBUG=1 python3 excel_merge.py ...` prints the
 full traceback.
+
+---
+
+## Want this done for you?
+
+The scripts are free and always will be. But if the files are due tomorrow and you
+would rather not touch a terminal, I run this as a paid service:
+
+- you send the folder as-is (`.xlsx`, `.xls`, `.csv`, GBK, whatever your ERP exports)
+- you get back one workbook, a `_log` sheet listing every cell that changed with
+  before/after, and a short note on what was wrong with the original data
+- if something is ambiguous — a date that could be read two ways — you get a question,
+  not a guess
+
+→ **[fiverr.com/claire999j](https://www.fiverr.com/claire999j)**
+
+Not sure whether your file fits? Message me with the column headers and a couple of
+sample rows. I will tell you honestly if it is something these tools cannot handle,
+instead of taking the order.
 
 ---
 
