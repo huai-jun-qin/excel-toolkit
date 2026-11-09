@@ -137,6 +137,27 @@ def b_ambiguous(path):
     wb.save(path)
 
 
+def b_space_money(path):
+    """千分位用空格/NBSP 写的金额，是文本但必须转成数字，否则 SUM 少算。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["客户", "金额"])
+    ws.append(["甲", "1\u00a0234.50"])
+    ws.append(["乙", "2 345"])
+    ws.append(["丙", "3100"])
+    wb.save(path)
+
+
+def b_ymd_int(path):
+    """20260305 存成整数：列名叫日期就转，列名叫编号就原样。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["日期", "编号", "数量"])
+    for i in range(3):
+        ws.append([20260305 + i, 20260305 + i, 12])
+    wb.save(path)
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -231,6 +252,21 @@ def c_ambiguous(ws, out):
     return f
 
 
+def c_space_money(ws, out):
+    f = []
+    eq(f, ws.cell(row=2, column=2).value, 1234.5, "NBSP 千分位金额")
+    eq(f, ws.cell(row=3, column=2).value, 2345, "空格千分位金额")
+    eq(f, ws.cell(row=4, column=2).value, 3100, "普通金额")
+    return f
+
+
+def c_ymd_int(ws, out):
+    f = []
+    eq(f, ws.cell(row=2, column=1).value, datetime(2026, 3, 5), "日期列的 8 位整数")
+    eq(f, ws.cell(row=2, column=2).value, 20260305, "编号列必须原样不动")
+    return f
+
+
 CASES = [
     ("整数金额不能被当成日期序列号", b_salary, [], c_salary),
     ("三种日期写法统一", b_dates, [], c_dates),
@@ -242,6 +278,8 @@ CASES = [
     ("完全重复行去掉", b_dupes, ["--dedupe"], c_dupes),
     ("前导零订单号保持文本", b_ids, [], c_ids),
     ("日期歧义按列内证据统一", b_ambiguous, [], c_ambiguous),
+    ("空格千分位金额要转数字", b_space_money, [], c_space_money),
+    ("8位整数：日期列转/编号列不转", b_ymd_int, [], c_ymd_int),
 ]
 
 

@@ -88,8 +88,12 @@ def to_number(s):
     t = tidy_text(halfwidth(s))
     if not t:
         return None
-    if NUM_RE.match(t):
-        bare = t.replace(",", "")
+    # "1 234.50" / "1\u00a0234.50" / "2 345": a space between digits is a
+    # thousands separator in many exports, not a break. Only between digits, so
+    # "12 pcs" stays text.
+    compact = re.sub(r"(?<=\d)[\s\u00a0\u2009\u3000]+(?=\d)", "", t)
+    if NUM_RE.match(compact):
+        bare = compact.replace(",", "")
         return int(bare) if INT_RE.match(bare) else float(bare)
     if MONEY_RE.match(t):
         bare = re.sub(r"[¥$€£￥\s元块]", "", t)
@@ -518,6 +522,8 @@ def main():
                 if isinstance(v, str) and not datey and \
                         YMD8_RE.match(tidy_text(halfwidth(v))):
                     continue           # 20260301 is more likely an id than a date
+                if isinstance(v, (int, float)) and datey and 19000101 <= int(v) <= 21001231:
+                    v = str(int(v))    # 20260305 stored as a number in a date column
                 dt, st, sep = parse_date(v, "auto")
                 if dt is not None:
                     hits += 1
@@ -584,6 +590,9 @@ def main():
                                 and ci not in allow_serial)
             if ci in date_cols and not numeric_not_date:
                 order = col_order.get(ci, "auto")
+                if isinstance(nv, (int, float)) and not isinstance(nv, bool) \
+                        and 19000101 <= int(nv) <= 21001231:
+                    nv = str(int(nv))  # YYYYMMDD kept as a number by the export
                 # parse strictly first: only a genuinely ambiguous value gets the assumption
                 dt, st, sep = parse_date(nv, "auto")
                 assumed = False
