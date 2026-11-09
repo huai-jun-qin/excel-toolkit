@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import traceback
+from collections import Counter
 from datetime import date, datetime, time
 
 try:
@@ -244,19 +245,19 @@ def _classify_sheets(pairs, sheet_opt, all_sheets, first_sheet=False):
 
 
 def iter_xls(path, sheet_opt, all_sheets, header_row=None, first_sheet=False, skip_sheets=()):
-    """Yield (sheet_label, headers, data_rows, note) for a legacy .xls file."""
+    """Yield (sheet_label, headers, data_rows, note, meta) for a legacy .xls file."""
     sheets = list(read_xls_sheets(path))
     if not sheets:
         return
     picked, skipped = classify_sheets(sheets, sheet_opt, all_sheets, first_sheet, skip_sheets)
     for name, reason in skipped:
-        yield name, None, [], "skipped: " + reason
+        yield name, None, [], "skipped: " + reason, None
     for name, table in picked:
         headers, rows = pick_header(table, header_row)
         if headers is None:
-            yield name, None, [], "skipped: empty sheet"
+            yield name, None, [], "skipped: empty sheet", None
             continue
-        yield name, headers, rows, ""
+        yield name, headers, rows, "", None
 
 
 def row_width(r):
@@ -409,15 +410,137 @@ def is_repeated_header(row, headers):
     return len(a) >= 2 and a == b
 
 
-def iter_sheets(path, sheet_opt, all_sheets, header_row=None, first_sheet=False, skip_sheets=()):
-    """Yield (sheet_label, headers, data_rows, note) for one file."""
+# ---------------------------------------------------------------------------
+# Merged cells and number formats
+#
+# Both are invisible to a values-only read:
+#   B2:B4 merged = "华东"  -> only B2 has the value, B3/B4 come through as None
+#   order id 123 with format "0000000" -> reads as 123, and the leading zeros are
+#   gone from the output even though the source file displays 0000123.
+# Neither shows up in a row-count check, so both need explicit handling.
+# ---------------------------------------------------------------------------
+_NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+       "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
+
+
+def sheet_merge_refs(path):
+    """{sheet name: ['B2:B4', ...]} read straight from the sheet XML.
+
+    openpyxl's read_only mode does not expose merged_cells, and loading the
+    workbook normally would defeat the whole point of streaming. Reading the zip
+    entry directly is cheap and exact.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    out = {}
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = set(z.namelist())
+            if "xl/workbook.xml" not in names:
+                return out
+            rels = {}
+            if "xl/_rels/workbook.xml.rels" in names:
+                for rel in ET.fromstring(z.read("xl/_rels/workbook.xml.rels")):
+                    rels[rel.get("Id")] = rel.get("Target")
+            sheets = ET.fromstring(z.read("xl/workbook.xml")).find("m:sheets", _NS)
+            if sheets is None:
+                return out
+            for sh in sheets:
+                target = rels.get(sh.get("{%s}id" % _NS["r"]), "")
+                if not target:
+                    continue
+                target = target.lstrip("/")
+                if not target.startswith("xl/"):
+                    target = "xl/" + target
+                if target not in names:
+                    continue
+                root = ET.fromstring(z.read(target))
+                mc = root.find("m:mergeCells", _NS)
+                refs = [c.get("ref") for c in mc if c.get("ref")] if mc is not None else []
+                if refs:
+                    out[sh.get("name")] = refs
+    except Exception:
+        return out
+    return out
+
+
+def fill_merged(table, refs, header_idx):
+    """Copy each merged block's top-left value across the block. Returns how many.
+
+    A merged range means "these cells are the same value" - Excel just shows it
+    once. Leaving the rest as None is how a region column ends up empty from row 2
+    down. Ranges that touch the header (a title spanning columns) are left alone:
+    filling those would invent columns.
+    """
+    from openpyxl.utils import range_boundaries
+
+    filled = 0
+    for ref in refs:
+        try:
+            min_col, min_row, max_col, max_row = range_boundaries(ref)
+        except Exception:
+            continue
+        if min_row - 1 <= header_idx:        # inside / above the header row
+            continue
+        r0, c0 = min_row - 1, min_col - 1
+        if r0 >= len(table) or c0 >= len(table[r0]):
+            continue
+        val = table[r0][c0]
+        if val is None:
+            continue
+        for r in range(r0, min(max_row, len(table))):
+            row = table[r]
+            if len(row) < max_col:
+                row.extend([None] * (max_col - len(row)))
+            for c in range(c0, max_col):
+                if row[c] is None:
+                    row[c] = val
+                    filled += 1
+    return filled
+
+
+_DATE_FMT = re.compile(r"[ymdhs]", re.I)
+_DIGIT_PLACE = re.compile(r"[0#]")
+
+
+def pick_number_format(fmts):
+    """Most common display format worth carrying over, or None.
+
+    Carried: 0000000 (an order id must keep its zeros), #,##0.00, ¥#,##0.00,
+    0.0% - formats that change what the reader SEES.
+    Not carried: date/time formats. Writing "yyyy-mm-dd" on a column makes every
+    reader (openpyxl included) treat the stored serial 46004 as a date, which
+    means merge would quietly start interpreting values. Unifying dates is
+    excel_clean.py's job, and its _log says so. Merge only concatenates.
+    """
+    if not fmts:
+        return None
+    for fmt, cnt in fmts.most_common():
+        if not fmt or fmt == "General":
+            continue
+        if "@" in fmt or len(fmt) > 60:
+            continue          # text format / pathological custom format
+        if _DATE_FMT.search(fmt) and not _DIGIT_PLACE.search(fmt):
+            continue          # date or time format: leave to clean
+        return fmt
+    return None
+
+
+def iter_sheets(path, sheet_opt, all_sheets, header_row=None, first_sheet=False,
+                skip_sheets=(), fill_merged_cells=True):
+    """Yield (sheet_label, headers, data_rows, note, meta) for one file.
+
+    meta = {"fmt": {col_index: Counter(number_format)}, "merged": n_filled} for
+    .xlsx, or None when there is nothing to carry (csv / legacy .xls).
+    """
     ext = os.path.splitext(path)[1].lower()
 
     if ext in (".csv", ".txt"):
         h, rows = read_csv(path)
         table = ([] if not h else [h] + rows)
         hdr, rows = pick_header(table, header_row)
-        yield "(csv)", hdr, rows, ""
+        yield "(csv)", hdr, rows, "", None
         return
 
     if ext == ".xls":
@@ -441,16 +564,38 @@ def iter_sheets(path, sheet_opt, all_sheets, header_row=None, first_sheet=False,
         picked, skipped = classify_sheets(probe, sheet_opt, all_sheets, first_sheet, skip_sheets)
 
         for n, reason in skipped:
-            yield n, None, [], "skipped: " + reason
+            yield n, None, [], "skipped: " + reason, None
 
+        merges = sheet_merge_refs(path) if fill_merged_cells else {}
         for n, _ in picked:
             ws = wb[n]
+            # Values: read raw, exactly as stored. A date kept as serial 46004 stays
+            # 46004 here - interpreting it is excel_clean.py's job, and doing it in
+            # both places would make the audit log lie about where a change happened.
             table = [list(r) for r in ws.iter_rows(values_only=True)]
-            headers, rows = pick_header(table, header_row)
-            if headers is None:
-                yield n, None, [], "skipped: empty sheet"
+            # Formats: a second pass over the first 200 rows (cheap, and a column's
+            # display format is almost always uniform). Read via Cell objects because
+            # values_only drops the format entirely.
+            fmts = {}
+            ws_fmt = wb[n]
+            for ri, row in enumerate(ws_fmt.iter_rows()):
+                if ri >= 200:
+                    break
+                for ci, c in enumerate(row):
+                    nf = c.number_format
+                    if nf and nf != "General":
+                        fmts.setdefault(ci, Counter())[nf] += 1
+            if not table:
+                yield n, None, [], "skipped: empty sheet", None
                 continue
-            yield n, headers, rows, ""
+            hdr_idx = (header_row - 1) if header_row else auto_header_index(table)
+            if hdr_idx >= len(table) or hdr_idx < 0:
+                yield n, None, [], "skipped: empty sheet", None
+                continue
+            merged_n = fill_merged(table, merges.get(n, []), hdr_idx) if merges else 0
+            headers = list(table[hdr_idx])
+            rows = [list(r) for r in table[hdr_idx + 1:]]
+            yield n, headers, rows, "", {"fmt": fmts, "merged": merged_n}
     finally:
         wb.close()
 
@@ -471,6 +616,8 @@ def main():
                     help="never read a sheet with this name (repeatable)")
     ap.add_argument("--strict", action="store_true",
                     help="exit with code 2 if any sheet was skipped, so a cron job notices")
+    ap.add_argument("--no-fill-merged", action="store_true",
+                    help="do not copy a merged cell's value across its block")
     ap.add_argument("--header-row", type=int, default=None,
                     help="1-based row index of the header (default: detected)")
     ap.add_argument("--alias", default=None, help="extra alias json, e.g. {\"name\": [\"客户名称\"]}")
@@ -507,26 +654,34 @@ def main():
     canonical = []          # ordered list of canonical column keys
     display = {}            # canonical key -> header text to show
     seen_variants = {}      # canonical key -> set of raw headers seen
+    col_fmt = {}            # canonical key -> Counter(number_format)
     aliased_log = []
+    split_log = []          # (file, raw header, the key it wanted to share)
     out_rows = []
     report = []             # (file, sheet, read, blank, dup, written, note)
     skipped_sheets = []     # (file, sheet, reason) - for the report and --strict
     failed = []
+    merged_filled = 0
 
     for path in files:
         fname = os.path.basename(path)
         try:
-            for sheet_label, headers, rows, note in iter_sheets(
+            for sheet_label, headers, rows, note, meta in iter_sheets(
                     path, args.sheet, args.all_sheets, args.header_row,
-                    args.first_sheet, args.skip_sheet or ()):
+                    args.first_sheet, args.skip_sheet or (), not args.no_fill_merged):
                 if headers is None:
                     report.append((fname, sheet_label, 0, 0, 0, 0, note or "empty sheet, skipped"))
                     skipped_sheets.append((fname, sheet_label, note or "empty sheet, skipped"))
                     continue
+                fmts = (meta or {}).get("fmt") or {}
+                merged_n = (meta or {}).get("merged") or 0
+                merged_filled += merged_n
+
                 # map raw header index -> canonical key
                 col_of = {}
                 for i, h in enumerate(headers):
-                    if h is None or str(h).strip() == "":
+                    raw = "" if h is None else str(h).strip()
+                    if raw == "":
                         if any(r[i] not in (None, "") for r in rows if i < len(r)):
                             key = "未命名列_%d" % (i + 1)
                         else:
@@ -536,13 +691,32 @@ def main():
                         if key not in canonical and canonical:
                             hit = difflib.get_close_matches(key, canonical, n=1, cutoff=args.fuzzy)
                             if hit:
-                                aliased_log.append((fname, str(h), hit[0]))
+                                aliased_log.append((fname, raw, hit[0]))
                                 key = hit[0]
+
+                    # Two columns of the SAME sheet on one key. "金额" and "合计"
+                    # are both in the built-in alias group, so the second column
+                    # would overwrite the first cell by cell: values change, every
+                    # row count still matches, and nothing warns. Split instead.
+                    if key in col_of.values():
+                        base = key
+                        suffix = norm(raw) or ("col%d" % (i + 1))
+                        key = "%s__%s" % (base, suffix)
+                        n = 2
+                        while key in col_of.values() or key in canonical:
+                            key = "%s__%s_%d" % (base, suffix, n)
+                            n += 1
+                        split_log.append((fname, raw or ("column %d" % (i + 1)),
+                                          display.get(base, base)))
+                        display[key] = raw or ("column %d" % (i + 1))
+
                     if key not in canonical:
                         canonical.append(key)
-                        display[key] = str(h).strip() if h not in (None, "") else key
+                        display.setdefault(key, raw if raw else key)
                     seen_variants.setdefault(key, set()).add(str(h))
                     col_of[i] = key
+                    if i in fmts:
+                        col_fmt.setdefault(key, Counter()).update(fmts[i])
 
                 written = blank = dup = 0
                 for r in rows:
@@ -568,10 +742,12 @@ def main():
                         rec["_source_sheet"] = sheet_label
                     out_rows.append(rec)
                     written += 1
-                note2 = ""
+                bits = []
                 if dup:
-                    note2 = "repeated header rows dropped: %d" % dup
-                report.append((fname, sheet_label, len(rows), blank, dup, written, note2))
+                    bits.append("repeated header rows dropped: %d" % dup)
+                if merged_n:
+                    bits.append("merged cells filled: %d" % merged_n)
+                report.append((fname, sheet_label, len(rows), blank, dup, written, "; ".join(bits)))
         except Exception as e:
             failed.append((fname, str(e)))
             report.append((fname, "-", 0, 0, 0, 0, "FAILED: %s" % e))
@@ -604,11 +780,24 @@ def main():
         letter = get_column_letter(ci)
         width = min(max(10, len(str(display.get(key, key))) + 4), 40)
         ws.column_dimensions[letter].width = width
+        # Carry the source display format: an order id stored as 123 with format
+        # "0000000" must still read 0000123, and a currency column must not turn
+        # into a bare 1234. The value itself is never touched.
+        fmt = pick_number_format(col_fmt.get(key))
+        if fmt:
+            for r in range(2, ws.max_row + 1):
+                ws.cell(row=r, column=ci).number_format = fmt
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
         for c in row:
-            if isinstance(c.value, (datetime, date)):
-                c.number_format = "yyyy-mm-dd" if not isinstance(c.value, datetime) or (
-                    c.value.hour == 0 and c.value.minute == 0) else "yyyy-mm-dd hh:mm"
+            if not isinstance(c.value, (datetime, date)):
+                continue
+            midnight = (not isinstance(c.value, datetime)) or (
+                c.value.hour == 0 and c.value.minute == 0 and c.value.second == 0)
+            fmt = c.number_format or "General"
+            if midnight and re.search(r"[hHsS]", fmt):
+                c.number_format = "yyyy-mm-dd"      # a date, not a timestamp at 00:00
+            elif fmt == "General":
+                c.number_format = "yyyy-mm-dd" if midnight else "yyyy-mm-dd hh:mm"
     ws.freeze_panes = "A2"
     if ws.max_row > 1:
         ws.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(canonical)), ws.max_row)
@@ -681,6 +870,16 @@ def main():
         print("\nSame column, different spellings (merged into one):")
         for k, vs in dup_headers.items():
             print("  - %s  <=  %s" % (display.get(k, k), " | ".join(sorted(vs))))
+
+    if split_log:
+        print("\nTwo columns wanted the same name - kept apart instead of overwriting:")
+        for f, h, base in split_log:
+            print("  - %-24s %-20s would have overwritten '%s'" % (f[:24], h[:20], base))
+
+    if merged_filled:
+        print("\nMerged cells: %d empty cells filled with their block's value "
+              "(a merged region means one value, not a blank one)." % merged_filled)
+        print("             Turn this off with --no-fill-merged if the blanks were meant to stay blank.")
 
     if failed:
         print("\nFAILED files (%d):" % len(failed))

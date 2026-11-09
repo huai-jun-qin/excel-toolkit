@@ -107,6 +107,7 @@ produce are `.xls`.
 | `--skip-sheet NAME` | never read that sheet (repeatable) |
 | `--header-row N` | header is on row N (default: auto-detect) |
 | `--strict` | exit code 2 if any sheet was skipped, so a cron job notices |
+| `--no-fill-merged` | don't copy a merged cell's value across its block |
 | `--alias my.json` | extend the built-in column-alias table |
 | `--no-source` | don't add `_source_file` / `_source_sheet` columns |
 | `--fuzzy 0.86` | header similarity threshold for auto-alignment |
@@ -130,6 +131,18 @@ produce are `.xls`.
   merging it double-counts. `--all-sheets` overrides that.
 - **The header printed again inside the data** — common in one-month-per-page
   exports. Those rows are dropped instead of landing as a `Name | Email` data row.
+- **Merged cells.** A `地区` cell merged over rows 2–4 means one value shown once;
+  reading it naively gives you the value on row 2 and blanks below. The value is
+  copied across its block (turn it off with `--no-fill-merged`), and the count is
+  reported per sheet.
+- **Two columns that want the same name.** A sheet with both `金额` and `合计`
+  used to end up with one column holding whichever came last — the values changed,
+  the row count stayed correct, and nothing warned. They are now kept apart and
+  the collision is listed on the console.
+- **Display formats that carry meaning.** An order id stored as `123` with format
+  `0000000`, or an amount in `¥#,##0.00`, keeps that format in the output. Date
+  formats are deliberately *not* carried: writing one makes the stored serial
+  number read as a date, and interpreting dates is `excel_clean.py`'s job.
 - **Blank rows** in the middle of data. Counted and skipped, never shifted.
 - **Rows wider than the header.** Extra values become `未命名列_n` / `Column_n`
   instead of being thrown away.
@@ -261,13 +274,16 @@ cd tools
 python3 selftest_merge.py
 ```
 
-It builds ten workbooks on the fly and asserts the output row by row: a cover
+It builds thirteen workbooks on the fly and asserts the output row by row: a cover
 page above the data, three months inside one file, a 4-cell `单位：元 | 期间：…`
 info line sitting above a 7-column header, the header printed twice, a sheet named
 `汇总`, a CSV with BOM and semicolons, a folder holding an instructions-only file,
 `--first-sheet` reading exactly one month, a 50-row single-column list (must stay
-data, not be mistaken for a cover), and a 2x2 table. All ten must pass; the script
-prints a diff-friendly `[PASS]/[FAIL]` line per case and exits non-zero on failure.
+data, not be mistaken for a cover), a 2x2 table, a merged `地区` block, one sheet
+holding both `金额` and `合计`, and an order id with an `0000000` format. All
+thirteen must pass; the script prints a diff-friendly `[PASS]/[FAIL]` line per case
+and exits non-zero on failure. Run it against an older copy with
+`MERGE_SCRIPT=/path/to/old/excel_merge.py` to see what a change actually fixed.
 
 ---
 

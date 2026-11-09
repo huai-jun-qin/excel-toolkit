@@ -194,6 +194,68 @@ def want_a1(text):
     return check
 
 
+def merged_region(path):
+    """地区 merged over B2:B4 - only B2 holds the value, B3/B4 read as None."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["客户名称", "地区", "金额"])
+    ws.append(["甲", "华东", 100])
+    ws.append(["乙", None, 200])
+    ws.append(["丙", None, 300])
+    ws.merge_cells("B2:B4")
+    wb.save(path)
+
+
+def amount_and_total(path):
+    """金额 and 合计 in ONE sheet. The built-in alias table groups them together,
+    so the second column used to overwrite the first value by value."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["客户名称", "金额", "合计"])
+    ws.append(["甲", 100, 130])
+    ws.append(["乙", 200, 230])
+    wb.save(path)
+
+
+def id_with_format(path):
+    """Order id stored as 123 with display format 0000000."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["订单号", "金额"])
+    ws.append([123, 10])
+    ws["A2"].number_format = "0000000"
+    wb.save(path)
+
+
+def want_merged_filled(wb):
+    ws = wb["Merged"]
+    ci = [c.value for c in ws[1]].index("地区") + 1
+    vals = [ws.cell(row=r, column=ci).value for r in range(2, ws.max_row + 1)]
+    return [] if vals == ["华东"] * 3 else ["地区 column = %r, expected 3x 华东" % (vals,)]
+
+
+def want_amount_split(wb):
+    ws = wb["Merged"]
+    hdr = [c.value for c in ws[1]]
+    if "金额" not in hdr or "合计" not in hdr:
+        return ["one column was lost: %r" % (hdr,)]
+    a = [ws.cell(row=r, column=hdr.index("金额") + 1).value for r in (2, 3)]
+    t = [ws.cell(row=r, column=hdr.index("合计") + 1).value for r in (2, 3)]
+    bad = []
+    if a != [100, 200]:
+        bad.append("金额=%r (was overwritten by 合计)" % (a,))
+    if t != [130, 230]:
+        bad.append("合计=%r" % (t,))
+    return bad
+
+
+def want_id_format(wb):
+    c = wb["Merged"].cell(row=2, column=1)
+    if c.value != 123:
+        return ["id value changed to %r" % (c.value,)]
+    return [] if c.number_format == "0000000" else ["number_format=%r" % (c.number_format,)]
+
+
 CASES = [
     ("cover page + data page", "a.xlsx", cover_and_data, 3, [], [want_header, want_no_header_row]),
     ("3 months in one file", "b.xlsx", months, 6, [], [want_months]),
@@ -205,6 +267,9 @@ CASES = [
     ("instructions file adds 0 rows", None, cover_only_folder, 2, [], [want_header, want_no_cover_text]),
     ("single-column list stays data", "g.xlsx", single_col_list, 50, [], [want_a1("邮箱")]),
     ("2x2 table stays data", "h.xlsx", tiny_table, 1, [], [want_header]),
+    ("merged cells filled down", "i.xlsx", merged_region, 3, [], [want_merged_filled]),
+    ("金额 / 合计 not merged together", "j.xlsx", amount_and_total, 2, [], [want_amount_split]),
+    ("order id keeps 0000000", "k.xlsx", id_with_format, 1, [], [want_id_format]),
 ]
 
 
