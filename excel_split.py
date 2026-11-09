@@ -65,7 +65,9 @@ def _xls_cell_value(cell, datemode):
 def load_table(src, sheet_opt):
     """Read a single sheet into a 2D list of plain values, from .xlsx or legacy .xls.
 
-    Returns (sheet_title, table). Raises RuntimeError with a readable message.
+    Returns (sheet_title, table, merged). merged is [(r0, r1, c0, c1)] 0-based,
+    because a merged block stores its value only in the top-left cell.
+    Raises RuntimeError with a readable message.
     """
     ext = os.path.splitext(src)[1].lower()
     if ext == ".xls":
@@ -99,7 +101,8 @@ def load_table(src, sheet_opt):
                         break
             table = [[_xls_cell_value(sh.cell(r, c), book.datemode) for c in range(sh.ncols)]
                      for r in range(sh.nrows)]
-            return sh.name, table
+            merged = [(rlo, rhi - 1, clo, chi - 1) for rlo, rhi, clo, chi in sh.merged_cells]
+            return sh.name, table, merged
         finally:
             try:
                 book.release_resources()
@@ -127,7 +130,9 @@ def load_table(src, sheet_opt):
                     break
             if ws_in is None:
                 ws_in = wb_in.worksheets[0]
-        return ws_in.title, [list(r) for r in ws_in.iter_rows(values_only=True)]
+        merged = [(rng.min_row - 1, rng.max_row - 1, rng.min_col - 1, rng.max_col - 1)
+                  for rng in ws_in.merged_cells.ranges]
+        return ws_in.title, [list(r) for r in ws_in.iter_rows(values_only=True)], merged
     finally:
         wb_in.close()
 
@@ -236,6 +241,30 @@ def auto_header_index(table, scan=10):
     return 0
 
 
+def fill_merged_cells(table, merged, hrow):
+    """Copy a merged block's value into its empty cells. Returns how many it filled.
+
+    A 地区 block merged over B2:B4 stores 华东 only in B2. Read plainly, the other
+    two rows have an empty key, so they are dropped as "no group" - three rows in,
+    one row out, and the only notice is a single line on the console.
+    """
+    filled = 0
+    for r0, r1, c0, c1 in merged:
+        if r0 <= hrow or r1 == r0 or r0 >= len(table):
+            continue
+        val = table[r0][c0] if c0 < len(table[r0]) else None
+        if val is None:
+            continue
+        for r in range(r0, min(r1, len(table) - 1) + 1):
+            while len(table[r]) <= c1:
+                table[r].append(None)
+            for c in range(c0, c1 + 1):
+                if table[r][c] is None:
+                    table[r][c] = val
+                    filled += 1
+    return filled
+
+
 def write_block(ws_target, headers, rows):
     ws_target.append(headers)
     for r in rows:
@@ -275,7 +304,7 @@ def main():
         sys.exit("Only .xlsx / .xlsm / .xls are supported.")
 
     try:
-        _, table = load_table(src, args.sheet)
+        _, table, merged = load_table(src, args.sheet)
     except RuntimeError as e:
         sys.exit(str(e))
 
@@ -286,10 +315,24 @@ def main():
         hrow = args.header_row - 1
     else:
         hrow = auto_header_index(table)
+
+    merged_filled = fill_merged_cells(table, merged, hrow)
+
     headers = [("" if h is None else str(h).strip()) or "Column_%d" % (i + 1)
                for i, h in enumerate(table[hrow])]
     body = [r + [None] * (len(headers) - len(r)) if len(r) < len(headers) else r[:len(headers)]
             for r in table[hrow + 1:]]
+
+    # the header printed again inside the data block (one-month-per-page exports do
+    # this) would otherwise become a group named "地区" holding a copy of the header
+    hdr_key = [("" if h is None else str(h).strip()) for h in table[hrow]]
+    kept, repeated = [], 0
+    for r in body:
+        if [("" if v is None else str(v).strip()) for v in r] == hdr_key:
+            repeated += 1
+            continue
+        kept.append(r)
+    body = kept
 
     # ---- decide groups ----
     groups = []           # list of (label, rows)
@@ -389,6 +432,11 @@ def main():
         print("\nSaved %d files -> %s" % (len(written), outdir))
 
     # ---- reconciliation ----
+    if merged_filled:
+        print("Merged cells    : %d empty cells filled from their block's value" % merged_filled)
+    if repeated:
+        print("Repeated header : %d row(s) dropped (the header printed again inside the data)"
+              % repeated)
     if total == len(body):
         print("Reconcile       : OK  (%d rows in, %d rows out)" % (len(body), total))
     else:

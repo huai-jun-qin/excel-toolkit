@@ -117,6 +117,11 @@ YMD8_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
 AMB_RE = re.compile(r"^(\d{1,2})([-/.])(\d{1,2})\2(\d{4})$")     # 05.03.2026 / 5-3-2026
 AMB2_RE = re.compile(r"^(\d{1,2})([-/.])(\d{1,2})\2(\d{2})$")    # 05.03.26
 
+# A bare number is a date only when the column itself says it is one. Excel date
+# serials and ordinary integers overlap in 20000-60000, which is exactly where
+# salaries, stock counts and order totals live.
+DATE_HEADER_RE = re.compile(r"日期|时间|date|time|day|月份|年月", re.I)
+
 
 def parse_date(v, order="auto"):
     """Return (datetime|None, status, sep_hint).
@@ -351,10 +356,16 @@ def main():
     ap.add_argument("--dedupe", action="store_true", help="drop exact duplicate rows")
     ap.add_argument("--dedupe-on", nargs="*", default=None, help="compare only these columns")
     ap.add_argument("--keep-empty-rows", action="store_true", help="keep fully empty rows")
+    ap.add_argument("--no-fill-merged", action="store_true",
+                    help="do not copy a merged block's value into its empty cells")
     ap.add_argument("--max-log", type=int, default=MAX_LOG_ROWS,
                     help="cap the _log sheet at N rows (default %d). Truncation is reported, "
                          "never silent." % MAX_LOG_ROWS)
     args = ap.parse_args()
+
+    cell_fmt = {}          # (excel_row, excel_col) -> number_format, 1-based
+    merged = []            # (r0, r1, c0, c1), 0-based, from the source sheet
+    ws_x = None            # the source worksheet (.xlsx only, for formats/merges)
 
     src = os.path.abspath(args.src)
     if not os.path.exists(src):
@@ -396,7 +407,21 @@ def main():
                 probe.append((w.title, head))
             sheet_title, _ = choose_pair(probe, None)
             ws_in = wb_in[sheet_title]
-        table = [list(r) for r in ws_in.iter_rows(values_only=True)]
+        ws_x = ws_in
+        # one pass, keeping both the value and the display format: a plain
+        # values_only read loses 0000000 on an order id and the ¥ on money.
+        table = []
+        for r_i, row in enumerate(ws_in.iter_rows(), start=1):
+            vals = []
+            for c_i, cell in enumerate(row, start=1):
+                vals.append(cell.value)
+                nf = cell.number_format
+                if nf and nf != "General":
+                    cell_fmt[(r_i, c_i)] = nf
+            table.append(vals)
+        for rng in ws_in.merged_cells.ranges:
+            merged.append((rng.min_row - 1, rng.max_row - 1,
+                           rng.min_col - 1, rng.max_col - 1))
 
     if not table:
         sys.exit("Sheet is empty: nothing to clean.")
@@ -407,6 +432,28 @@ def main():
             sys.exit("--header-row %d is past the end of the sheet" % args.header_row)
     else:
         hrow = auto_header_index(table)
+
+    # ---- merged blocks: one value means every cell in the block ----
+    # Excel stores a merged region's value only in its top-left cell. Read plainly,
+    # rows 3-4 of a 地区 block come back as None, which looks exactly like missing
+    # source data and cannot be told apart later.
+    merged_filled = []
+    if merged and not args.no_fill_merged:
+        for r0, r1, c0, c1 in merged:
+            if r0 <= hrow or r1 == r0:     # above the header, or a single row: leave it
+                continue
+            if r0 >= len(table):
+                continue
+            val = table[r0][c0] if c0 < len(table[r0]) else None
+            if val is None:
+                continue
+            for r in range(r0, min(r1, len(table) - 1) + 1):
+                while len(table[r]) <= c1:
+                    table[r].append(None)
+                for c in range(c0, c1 + 1):
+                    if table[r][c] is None:
+                        table[r][c] = val
+                        merged_filled.append((r + 1, c, val))
 
     raw_headers = table[hrow]
     body = table[hrow + 1:]
@@ -441,9 +488,14 @@ def main():
         if raw is not None and str(raw) != new:
             note(hrow + 1, get_column_letter(i + 1), raw, new, "header tidied")
 
+    for ri, ci, val in merged_filled:
+        if ci < ncol:
+            note(ri, headers[ci], "(empty)", val, "merged cell filled")
+
     # ---- decide which columns are dates / numbers, and how to read them ----
     sample = [r for r in body if any(c not in (None, "") for c in r)][:500]
     date_cols, num_cols, col_order = set(), set(), {}
+    allow_serial = set()      # columns where a bare number may be an Excel date serial
 
     for ci in range(ncol):
         vals = [r[ci] for r in sample if r[ci] not in (None, "")]
@@ -452,10 +504,20 @@ def main():
 
         if args.dates == "iso" and not all(
                 isinstance(v, str) and looks_like_id(v) for v in vals):
+            # A bare integer is a date only if this column is about dates. Without
+            # this check 工资 35000 turns into 1995-10-28, and every row count and
+            # the reconciliation line still say OK.
+            datey = bool(DATE_HEADER_RE.search(str(headers[ci])))
+            serial_ok = datey or any(isinstance(v, (datetime, date)) for v in vals)
             hits = 0
             ev = Counter()
             seps = Counter()
             for v in vals:
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and not serial_ok:
+                    continue           # money / quantity / stock, not a date
+                if isinstance(v, str) and not datey and \
+                        YMD8_RE.match(tidy_text(halfwidth(v))):
+                    continue           # 20260301 is more likely an id than a date
                 dt, st, sep = parse_date(v, "auto")
                 if dt is not None:
                     hits += 1
@@ -467,6 +529,8 @@ def main():
             if hits + sum(seps.values()) > 0 and \
                     (hits + sum(seps.values())) / len(vals) >= 0.6:
                 date_cols.add(ci)
+                if serial_ok:
+                    allow_serial.add(ci)
                 if args.date_order != "auto":
                     col_order[ci] = args.date_order
                 elif ev["dmy"] > ev["mdy"]:
@@ -483,7 +547,14 @@ def main():
             textual = [v for v in vals if isinstance(v, str) and not looks_like_id(v)]
             if textual:
                 nhit = sum(1 for v in textual if to_number(v) is not None)
-                if nhit / len(vals) >= 0.5 and nhit / len(textual) >= 0.8:
+                n_real = sum(1 for v in vals
+                             if isinstance(v, (int, float)) and not isinstance(v, bool))
+                # A column that is already 90% real numbers, with a few "¥1,234"
+                # strings mixed in, must still be coerced - otherwise SUM quietly
+                # skips those cells and the customer's total comes out low.
+                mostly_numbers = n_real / len(vals) >= 0.5 and nhit / len(textual) >= 0.5
+                mostly_text = nhit / len(vals) >= 0.5 and nhit / len(textual) >= 0.8
+                if mostly_numbers or mostly_text:
                     num_cols.add(ci)
 
     # ---- cell level cleaning ----
@@ -507,7 +578,11 @@ def main():
                     note(ri, headers[ci], v, t, "whitespace / full-width normalised")
                     nv = t
 
-            if ci in date_cols:
+            # a number in a column that was never vouched for as a date column
+            # must not be reinterpreted as a serial, whatever the column statistic said
+            numeric_not_date = (isinstance(nv, (int, float)) and not isinstance(nv, bool)
+                                and ci not in allow_serial)
+            if ci in date_cols and not numeric_not_date:
                 order = col_order.get(ci, "auto")
                 # parse strictly first: only a genuinely ambiguous value gets the assumption
                 dt, st, sep = parse_date(nv, "auto")
@@ -566,7 +641,7 @@ def main():
         out_rows = keep
 
     # ---- write ----
-    out = args.out or re.sub(r"\.xlsx$", "", src) + "_clean.xlsx"
+    out = args.out or os.path.splitext(src)[0] + "_clean.xlsx"
     out = os.path.abspath(out)
     wb = Workbook()
     ws = wb.active
@@ -574,6 +649,14 @@ def main():
     ws.append(headers)
     for _, r in out_rows:
         ws.append(r)
+    # Carry the display formats that change what the reader sees (order id 0000000,
+    # ¥#,##0.00). Date formats are skipped: those cells now hold a real date and get
+    # one below, and "@" would show a freshly coerced number as text again.
+    for out_i, (ri, r) in enumerate(out_rows, start=2):
+        for ci in range(ncol):
+            nf = cell_fmt.get((ri, ci + 1))
+            if nf and nf not in ("General", "@") and not isinstance(r[ci], datetime):
+                ws.cell(row=out_i, column=ci + 1).number_format = nf
     for ci in range(1, ncol + 1):
         ws.column_dimensions[get_column_letter(ci)].width = min(
             max(10, len(str(headers[ci - 1])) + 4), 34)
@@ -611,6 +694,7 @@ def main():
     ss.append(["Rows read", rows_in])
     ss.append(["Empty rows dropped", dropped_empty])
     ss.append(["Duplicate rows dropped", len(dup_rows)])
+    ss.append(["Merged cells filled", len(merged_filled)])
     ss.append(["Rows written", len(out_rows)])
     ss.append(["Cells changed", len(log) + log_dropped])
     if log_dropped:
@@ -639,6 +723,9 @@ def main():
     print("Rows read       : %d" % rows_in)
     print("Empty dropped   : %d" % dropped_empty)
     print("Duplicate drop  : %d" % len(dup_rows))
+    if merged_filled:
+        print("Merged filled   : %d cells (a merged block holds one value, not blanks)"
+              % len(merged_filled))
     print("Rows written    : %d" % len(out_rows))
     print("Cells changed   : %d" % (len(log) + log_dropped))
     print("Reconcile       : %s" % ("OK" if rows_in - dropped_empty - len(dup_rows) == len(out_rows)
