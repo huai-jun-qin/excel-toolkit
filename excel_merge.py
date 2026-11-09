@@ -527,6 +527,49 @@ def pick_number_format(fmts):
     return None
 
 
+def looks_numeric_text(v):
+    """A string that is really a number wearing decoration: '¥1,234', ' 88 ', '1,234.50'."""
+    if not isinstance(v, str):
+        return False
+    s = v.strip()
+    if not s:
+        return False
+    for ch in (",", "¥", "$", "￥", "元", " ", "\u00a0"):
+        s = s.replace(ch, "")
+    try:
+        float(s)
+        return True
+    except Exception:
+        return False
+
+
+def mixed_type_columns(out_rows, canonical, display, sample=3000):
+    """Columns holding both real numbers and number-looking text.
+
+    This is the quiet one: Excel's SUM, pivot tables and date filters skip text
+    cells without a word, so the customer's total comes out low while every cell
+    looks fine. Merge cannot fix it (it never rewrites a value) - but it can say
+    so, and excel_clean.py can coerce the text.
+    """
+    found = []
+    rows = out_rows[:sample]
+    for k in canonical:
+        if str(k).startswith("_"):
+            continue
+        n_num = n_txt = 0
+        for rec in rows:
+            v = rec.get(k)
+            if v is None or isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float, datetime, date)):
+                n_num += 1
+            elif looks_numeric_text(v):
+                n_txt += 1
+        if n_num and n_txt:
+            found.append((display.get(k, k), n_num, n_txt))
+    return found
+
+
 def iter_sheets(path, sheet_opt, all_sheets, header_row=None, first_sheet=False,
                 skip_sheets=(), fill_merged_cells=True):
     """Yield (sheet_label, headers, data_rows, note, meta) for one file.
@@ -880,6 +923,13 @@ def main():
         print("\nMerged cells: %d empty cells filled with their block's value "
               "(a merged region means one value, not a blank one)." % merged_filled)
         print("             Turn this off with --no-fill-merged if the blanks were meant to stay blank.")
+
+    mixed = mixed_type_columns(out_rows, canonical, display)
+    if mixed:
+        print("\nMixed types inside one column (Excel's SUM silently skips the text cells):")
+        for name, nn, nt in mixed:
+            print("  - %-24s %d numbers, %d text values   -> excel_clean.py can coerce them"
+                  % (str(name)[:24], nn, nt))
 
     if failed:
         print("\nFAILED files (%d):" % len(failed))
