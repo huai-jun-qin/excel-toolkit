@@ -192,12 +192,24 @@ python3 excel_clean.py --src dirty.xlsx --dedupe --out clean.xlsx
 - **Dates** in any of these forms → one real Excel date:
   `2026-03-05`, `2026/3/5`, `2026年3月5日`, `05.03.2026`, `2026-03-05 14:30`,
   `20260305`, and bare Excel serial numbers (`46000`). Time-of-day is kept.
+  A bare number is only read as a date when the **column header says it is one**
+  (`日期` / `时间` / `date` / `time`) or the column already holds real dates.
+  Without that rule a salary column of `35000` becomes 1995-10-28 — a real bug
+  this tool shipped in an earlier version, and the reason `selftest_clean.py`
+  exists.
+- **Merged blocks.** A `地区` cell merged over `B2:B4` stores its value only in
+  `B2`; read plainly, rows 3-4 look like missing data. The value is copied across
+  the block and the count is reported (`--no-fill-merged` turns it off).
+- **Display formats that change what you see** are carried over: an order id
+  `123` keeps its `0000000` format, money keeps its `¥`. Date formats are
+  deliberately not carried — the value is already a real date.
 - **Numbers stored as text**: `"1,234.50"`, `"¥ 88 元"`, `" 12 "` → `1234.5`, `88`, `12`
 - **IDs keep their leading zeros.** `00123` is never turned into `123`. The tool
   recognises the pattern and skips coercion for that column.
 - **Duplicate rows**, optional, with the dropped row numbers listed.
 - Empty cells are counted per column and reported. **They are never filled in** —
-  inventing a value is not cleaning.
+  inventing a value is not cleaning. The one exception is a merged block, where
+  the value already exists and Excel merely stores it once (see above).
 - **A cover sheet above the data.** Instead of cleaning the title page, it picks the
   first sheet that actually looks like a table. If the workbook holds several
   sheets with data, it says so on the console and names them — cleaning writes one
@@ -245,6 +257,13 @@ replaced), long values truncated, duplicates suffixed. In `sheets` mode an
 If the workbook opens with a cover page, the split starts from the first sheet that
 is an actual table — splitting a title page by "column" has nothing to group by.
 
+**Rows are never dropped quietly.** A key cell that sits inside a merged block is
+filled from that block first: a 3-row table split on a merged `地区` column used to
+come out as one row, with two rows gone and a single console line. A row whose key
+is genuinely empty is still skipped, but it is counted and printed. A header row
+printed again inside the data becomes nothing — it used to become a group named
+`地区` holding a copy of the header.
+
 ---
 
 ## Verifying it yourself
@@ -271,19 +290,41 @@ The awkward shapes that break most merge scripts have their own test file:
 
 ```bash
 cd tools
-python3 selftest_merge.py
+python3 selftest_merge.py     # 13 cases
+python3 selftest_clean.py     # 10 cases
+python3 selftest_split.py     #  7 cases
 ```
 
-It builds thirteen workbooks on the fly and asserts the output row by row: a cover
-page above the data, three months inside one file, a 4-cell `单位：元 | 期间：…`
-info line sitting above a 7-column header, the header printed twice, a sheet named
-`汇总`, a CSV with BOM and semicolons, a folder holding an instructions-only file,
-`--first-sheet` reading exactly one month, a 50-row single-column list (must stay
-data, not be mistaken for a cover), a 2x2 table, a merged `地区` block, one sheet
-holding both `金额` and `合计`, and an order id with an `0000000` format. All
-thirteen must pass; the script prints a diff-friendly `[PASS]/[FAIL]` line per case
-and exits non-zero on failure. Run it against an older copy with
-`MERGE_SCRIPT=/path/to/old/excel_merge.py` to see what a change actually fixed.
+Each one builds its workbooks on the fly and asserts the output cell by cell.
+
+`selftest_merge.py` covers a cover page above the data, three months inside one
+file, a 4-cell `单位：元 | 期间：…` info line sitting above a 7-column header, the
+header printed twice, a sheet named `汇总`, a CSV with BOM and semicolons, a folder
+holding an instructions-only file, `--first-sheet` reading exactly one month, a
+50-row single-column list (must stay data, not be mistaken for a cover), a 2x2
+table, a merged `地区` block, one sheet holding both `金额` and `合计`, and an order
+id with an `0000000` format.
+
+`selftest_clean.py` covers the case that matters most: a salary column of
+35000 / 28000 / 42000 must stay numbers. It used to come out as 1995-10-28 /
+1976-08-28 / 2014-12-27, because those integers fall in Excel's date-serial range
+and the log called it "date unified" while reconciliation still said OK. It also
+covers three date spellings in one column, `¥1,234` text inside a numeric column,
+a merged block, a `0000000` order id, a cover sheet, deduplication, and leading
+zeros.
+
+`selftest_split.py` covers a merged `地区` block (3 rows in, 3 rows out — it used to
+be 1), an empty key, `华东/上海` as a file name, fixed-size chunks, a repeated header
+row, a cover sheet, and `35000` vs `35000.0` landing in the same group.
+
+All of them print a diff-friendly `[PASS]/[FAIL]` line per case and exit non-zero
+on failure. Point them at an older copy to see what a change actually fixed:
+
+```bash
+MERGE_SCRIPT=/tmp/old_merge.py python3 selftest_merge.py
+CLEAN_SCRIPT=/tmp/old_clean.py python3 selftest_clean.py
+SPLIT_SCRIPT=/tmp/old_split.py python3 selftest_split.py
+```
 
 ---
 
@@ -292,7 +333,7 @@ and exits non-zero on failure. Run it against an older copy with
 **Does it need Excel installed?** No. `openpyxl` reads and writes `.xlsx` directly.
 
 **How fast is it, really?** Measured, not estimated: 60,000 rows spread over 3 files —
-merge 6 s, clean 10 s (104,989 cell changes logged), split into 5 files 9 s. On a
+merge 6 s, clean 7 s (104,989 cell changes logged), split into 5 files 9 s. On a
 slower machine expect minutes, not hours. The tools never load the whole workbook
 into a GUI, so file size stops being a reason to do it by hand.
 
