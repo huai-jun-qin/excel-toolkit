@@ -3,6 +3,8 @@
 > **Rather not run scripts yourself?** I do this as a service — you send the files,
 > you get back one clean workbook plus a cell-by-cell change log.
 > → [fiverr.com/claire999j](https://www.fiverr.com/claire999j)
+>
+> 中文用户：三步装好跑通看 [使用说明](使用说明.md)；不想自己跑，[直接把文件发我](https://www.fiverr.com/claire999j)。
 
 Three small command-line tools for people who get a folder of messy Excel files and
 need one clean table out of it. No GUI to click through, no "merge wizard" that
@@ -13,6 +15,8 @@ Built for the case that keeps showing up in real work:
 > "I have 20 monthly exports from our ERP. Every file has the same data but the
 > column names are spelled differently, dates come in four formats, some numbers
 > are text, and half of them have a title row on top. I need one table."
+
+![The three self-tests: 13 + 10 + 7 dirty workbooks, asserted cell by cell](docs/selftest.png)
 
 | | Manual | This toolkit |
 |---|---|---|
@@ -325,6 +329,47 @@ MERGE_SCRIPT=/tmp/old_merge.py python3 selftest_merge.py
 CLEAN_SCRIPT=/tmp/old_clean.py python3 selftest_clean.py
 SPLIT_SCRIPT=/tmp/old_split.py python3 selftest_split.py
 ```
+
+---
+
+## 中文说明
+
+三个命令行小工具，处理「一堆乱 Excel 合成一张干净表」。设计上只有一条铁律：
+**可以改数据，但绝不偷偷改** —— 每个被改动的格子都写进 `_log`，看不准的日期原样留着并标出来。
+
+**三步跑通**
+
+```bash
+python3 -m pip install --user openpyxl xlrd
+cd tools
+python3 make_test_data.py      # 造一批故意做脏的样例
+python3 demo_check.py          # 四行全绿 = 环境没问题
+```
+
+**三个命令**
+
+| 要做什么 | 命令 |
+|---|---|
+| 多个文件合成一张表（列名不一致也能合） | `python3 excel_merge.py --src 文件夹 --out all.xlsx` |
+| 清理一份表（日期统一、文本转数字、去重） | `python3 excel_clean.py --src 乱.xlsx --out 干净.xlsx --dedupe` |
+| 按某列拆成多个文件 | `python3 excel_split.py --src all.xlsx --by 地区 --out 拆分目录` |
+
+**结果只看三处**
+
+- 合并后：`_report` 表最底下的 `CHECK` 必须是 `OK`，`SHEETS NOT READ` 那几行要看一眼
+- 清洗后：`_log` 是每个格子的改前/改后，`_summary` 是行数对账（读入 − 空行 − 重复 = 写出）
+- 拆分后：终端那行 `Reconcile` 必须写 `OK`
+
+**两个最容易踩的坑**
+
+1. `pip install` 装到了另一个 Python。用 `python3 -m pip`，它一定装给当前这个解释器。
+2. 数字被当成日期。`35000` 只有在列名是「日期/时间/date」时才会被解释成序列号，
+   工资、销量、库存这类列不会。这是早期版本的真实 bug，`selftest_clean.py` 就是为它写的。
+
+完整中文步骤见 [使用说明.md](使用说明.md)。
+
+**不想自己跑？** 把文件发我，我回你一份干净的表 + 逐格改动记录：
+[fiverr.com/claire999j](https://www.fiverr.com/claire999j)
 
 ---
 
