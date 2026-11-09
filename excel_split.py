@@ -26,7 +26,20 @@ try:
     from openpyxl import Workbook, load_workbook
     from openpyxl.utils import get_column_letter
 except ImportError:
-    sys.exit("Missing dependency. Run:  pip install openpyxl")
+    sys.exit(
+        "Missing dependency: openpyxl\n"
+        "\n"
+        "You are running:  %s  (Python %s)\n"
+        "\n"
+        "Install it for that exact interpreter:\n"
+        "    %s -m pip install --user openpyxl\n"
+        "\n"
+        "If pip says 'externally-managed-environment', add --break-system-packages.\n"
+        "If you have more than one Python installed, a plain 'pip install' often\n"
+        "lands in a different one - the command above always targets the Python\n"
+        "that is running this script."
+        % (sys.executable, sys.version.split()[0], sys.executable)
+    )
 
 
 def _xls_cell_value(cell, datemode):

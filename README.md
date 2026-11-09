@@ -36,9 +36,26 @@ alone and flagged, not guessed at.
 - `xlrd` (optional — only needed to read legacy Excel 97-2003 `.xls` files)
 
 ```bash
-pip install openpyxl
-pip install xlrd      # optional: adds .xls support
+python3 -m pip install --user openpyxl
+python3 -m pip install --user xlrd      # optional: adds .xls support
 ```
+
+**Use `python3 -m pip`, not bare `pip`.** If more than one Python is installed
+(macOS ships one, Homebrew adds another, pyenv adds more), a plain `pip install`
+often lands in a different interpreter than the one that runs the script — and
+you then get `No module named 'openpyxl'` on a machine that "definitely has it".
+`python3 -m pip` always targets the interpreter you are about to run.
+
+Check before running:
+
+```bash
+python3 -c "import openpyxl; print(openpyxl.__version__)"
+```
+
+If pip refuses with `externally-managed-environment`, add `--break-system-packages`.
+When the import is still missing, the scripts now print the exact interpreter they
+are running under and the command that installs into it, instead of a bare
+"pip install openpyxl".
 
 Tested on macOS and Windows with Python 3.9–3.13. No pandas, no compiled
 dependencies, no internet access needed.
