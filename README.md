@@ -1,13 +1,14 @@
-# Excel Toolkit — Merge, Clean, Split (no data loss, full audit trail)
+# Excel Toolkit — Profile, Merge, Clean, Split (no data loss, full audit trail)
 
 > **Rather not run scripts yourself?** I do this as a service — you send the files,
 > you get back one clean workbook plus a cell-by-cell change log.
 > → [fiverr.com/claire999j](https://www.fiverr.com/claire999j)
 >
-> 中文用户：三步装好跑通看 [使用说明](使用说明.md)；不想自己跑，[直接把文件发我](https://www.fiverr.com/claire999j)。
+> 中文用户：四步装好跑通看 [使用说明](使用说明.md)；不想自己跑，[直接把文件发我](https://www.fiverr.com/claire999j)。
 
-Three small command-line tools for people who get a folder of messy Excel files and
-need one clean table out of it. No GUI to click through, no "merge wizard" that
+Four small command-line tools for people who get a folder of messy Excel files and
+need one clean table out of it — plus a read-only check that tells you what is
+wrong before anything is touched. No GUI to click through, no "merge wizard" that
 silently drops your columns, no manual copy-paste that quietly corrupts dates.
 
 Built for the case that keeps showing up in real work:
@@ -16,7 +17,7 @@ Built for the case that keeps showing up in real work:
 > column names are spelled differently, dates come in four formats, some numbers
 > are text, and half of them have a title row on top. I need one table."
 
-![The three self-tests: 13 + 10 + 7 dirty workbooks, asserted cell by cell](docs/selftest.png)
+![The four self-tests: 13 + 12 + 7 + 17 dirty workbooks, asserted cell by cell](docs/selftest.png)
 
 | | Manual | This toolkit |
 |---|---|---|
@@ -26,10 +27,10 @@ Built for the case that keeps showing up in real work:
 | Did every row survive? | you hope so | the tool prints rows in vs rows out and fails loudly if they differ |
 | What exactly changed? | nobody knows | a `_log` sheet: row, column, before, after, reason |
 
-The design rule behind all three tools: **a tool may transform data, but it may
+The design rule behind all four tools: **a tool may transform data, but it may
 never transform it silently.** Every cell that changes shows up in a log. Anything
 the tool cannot decide — a date that could honestly be read two ways — is left
-alone and flagged, not guessed at.
+alone and flagged, not guessed at. The profiler writes nothing at all.
 
 ---
 
@@ -270,12 +271,60 @@ printed again inside the data becomes nothing — it used to become a group name
 
 ---
 
+## 4. `excel_profile.py`
+
+Inspect a workbook *before* cleaning it. This one is read-only by design: the file
+is opened, never saved back, so it is safe to run on the client's original.
+
+```bash
+python3 excel_profile.py --src dirty.xlsx                        # score + findings
+python3 excel_profile.py --src dirty.xlsx --md report.md --html report.html
+python3 excel_profile.py --src dirty.xlsx --strict               # exit 2 on high severity
+```
+
+| Flag | What it does |
+|---|---|
+| `--src FILE` | input `.xlsx` / `.xlsm` / legacy `.xls` / `.csv` (required) |
+| `--sheet NAME` | profile only this sheet |
+| `--header-row N` | header is on row N (default: auto-detect) |
+| `--out PATH` | report workbook (default: `<name>_profile.xlsx`) |
+| `--md` / `--html` / `--json` | also write a Markdown / standalone HTML / JSON report |
+| `--strict` | exit 2 when any high-severity issue exists |
+| `--max-rows N` | cap rows read per sheet |
+
+The output is three sheets. `_summary` holds the row counts, merged blocks, cover
+pages, a 0–100 readiness score and a one-line verdict. `_columns` has one row per
+column: fill rate, inferred type, how many numbers are stored as text, how many
+cells carry dirty whitespace or invisible characters, how many date spellings
+appear, whether the column looks like a leading-zero ID, and the longest value.
+`_issues` is the ranked finding list — `high` / `medium` / `low` / `info`, each with
+the affected cells, why it matters, and what to do about it.
+
+Scoring is deliberately blunt: 100 minus 10 per high, 5 per medium, 2 per low
+(`info` is free). A workbook that scores 30 is not "almost fine" — it means fix the
+data before analysing it, which is the sentence the verdict prints.
+
+Two rules the checks follow, because getting them wrong produces confident bad
+advice:
+
+- **A column that is mostly empty is not "120% empty".** Fill rate is measured
+  against every row in the data region, so the number can never exceed 100.
+- **`20260305` is a date, not a number.** An 8-digit value that parses as a date
+  spelling is excluded from "numbers stored as text" — otherwise the advice would
+  be "convert to number", and the date would be destroyed. The same reasoning keeps
+  `00123` from being reported as a number: the tool says the column *should* stay
+text.
+
+A merged title band sitting above the header is normal in exported reports and is
+not reported; only merges inside the data region are.
+
+---
+
 ## Verifying it yourself
 
 The repo ships with a deliberately dirty test set and a generator for it:
 
 ```bash
-cd tools
 python3 make_test_data.py                 # builds samples/dirty
 python3 excel_merge.py --src samples/dirty --out /tmp/m.xlsx
 python3 excel_clean.py --src /tmp/m.xlsx --out /tmp/c.xlsx --dedupe
@@ -293,10 +342,10 @@ equal rows written — the tool says so itself on the `_report` sheet.
 The awkward shapes that break most merge scripts have their own test file:
 
 ```bash
-cd tools
 python3 selftest_merge.py     # 13 cases
-python3 selftest_clean.py     # 10 cases
+python3 selftest_clean.py     # 12 cases
 python3 selftest_split.py     #  7 cases
+python3 selftest_profile.py   # 17 cases
 ```
 
 Each one builds its workbooks on the fly and asserts the output cell by cell.
@@ -321,6 +370,18 @@ zeros.
 be 1), an empty key, `华东/上海` as a file name, fixed-size chunks, a repeated header
 row, a cover sheet, and `35000` vs `35000.0` landing in the same group.
 
+`selftest_profile.py` builds one workbook per failure mode and asserts the finding
+appears — and that it does *not* appear when the data is fine. It covers a header on
+row 3 under a merged title, text money, leading-zero IDs, four date spellings in one
+column, the `20260305` trap, day/month ambiguity, duplicates, blank rows, a merged
+block, a repeated header, a duplicated column name, nbsp and zero-width characters,
+and cover-page detection. It also checks the two promises that matter: the source
+file's SHA-1 and mtime are unchanged after a run, and `--strict` returns exit 2.
+
+A clean workbook must score 100 and produce no findings — that case is in there too,
+because a checker that complains about everything is as useless as one that
+complains about nothing.
+
 All of them print a diff-friendly `[PASS]/[FAIL]` line per case and exit non-zero
 on failure. Point them at an older copy to see what a change actually fixed:
 
@@ -328,33 +389,38 @@ on failure. Point them at an older copy to see what a change actually fixed:
 MERGE_SCRIPT=/tmp/old_merge.py python3 selftest_merge.py
 CLEAN_SCRIPT=/tmp/old_clean.py python3 selftest_clean.py
 SPLIT_SCRIPT=/tmp/old_split.py python3 selftest_split.py
+PROFILE_SCRIPT=/tmp/old_profile.py python3 selftest_profile.py
 ```
 
 ---
 
 ## 中文说明
 
-三个命令行小工具，处理「一堆乱 Excel 合成一张干净表」。设计上只有一条铁律：
+四个命令行小工具，处理「一堆乱 Excel 合成一张干净表」。设计上只有一条铁律：
 **可以改数据，但绝不偷偷改** —— 每个被改动的格子都写进 `_log`，看不准的日期原样留着并标出来。
+体检工具更进一步：它一个格子都不写，只告诉你哪里不对劲。
 
-**三步跑通**
+**四步跑通**
 
 ```bash
 python3 -m pip install --user openpyxl xlrd
-cd tools
 python3 make_test_data.py      # 造一批故意做脏的样例
-python3 demo_check.py          # 四行全绿 = 环境没问题
+python3 excel_profile.py --src samples/dirty/orders_01.xlsx   # 先体检，只读不改
+python3 selftest_clean.py      # 12 行 PASS = 环境没问题
 ```
 
-**三个命令**
+**四个命令**
 
 | 要做什么 | 命令 |
 |---|---|
+| 先看看这份表有多脏（只读，不动文件） | `python3 excel_profile.py --src 乱.xlsx --md 报告.md` |
 | 多个文件合成一张表（列名不一致也能合） | `python3 excel_merge.py --src 文件夹 --out all.xlsx` |
 | 清理一份表（日期统一、文本转数字、去重） | `python3 excel_clean.py --src 乱.xlsx --out 干净.xlsx --dedupe` |
 | 按某列拆成多个文件 | `python3 excel_split.py --src all.xlsx --by 地区 --out 拆分目录` |
 
-**结果只看三处**
+**结果只看这几处**
+
+- 体检后：`_summary` 里的 `score` 和那句结论；`_issues` 按 high / medium / low 排好，每条都指出是哪几个格子
 
 - 合并后：`_report` 表最底下的 `CHECK` 必须是 `OK`，`SHEETS NOT READ` 那几行要看一眼
 - 清洗后：`_log` 是每个格子的改前/改后，`_summary` 是行数对账（读入 − 空行 − 重复 = 写出）
@@ -378,7 +444,8 @@ python3 demo_check.py          # 四行全绿 = 环境没问题
 **Does it need Excel installed?** No. `openpyxl` reads and writes `.xlsx` directly.
 
 **How fast is it, really?** Measured, not estimated: 60,000 rows spread over 3 files —
-merge 6 s, clean 7 s (104,989 cell changes logged), split into 5 files 9 s. On a
+merge 6 s, clean 7 s (104,989 cell changes logged), split into 5 files 9 s. Profiling
+that same 60,000-row sheet takes 7 s and writes nothing but the report. On a
 slower machine expect minutes, not hours. The tools never load the whole workbook
 into a GUI, so file size stops being a reason to do it by hand.
 
@@ -386,7 +453,7 @@ into a GUI, so file size stops being a reason to do it by hand.
 come through as their last calculated value. This is a data-extraction tool, not an
 editor — run it on exports, not on your live model.
 
-**`.xls`?** Supported directly across all three tools (merge, clean, split), as long
+**`.xls`?** Supported directly across all four tools (profile, merge, clean, split), as long
 as `xlrd` is installed (`pip install xlrd`). The `.xls` in `samples/dirty` is a
 deliberately fake one — a text file renamed to `.xls` — to prove the tool reports a
 bad file instead of dying. A real legacy file lives in

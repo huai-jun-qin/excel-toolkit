@@ -15,7 +15,7 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, os.pardir, "excel-toolkit", "docs")
+OUT = os.path.join(HERE, "docs")
 MONO = "/System/Library/Fonts/Menlo.ttc"
 CJK = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
 
@@ -247,9 +247,75 @@ def case_split():
     return p
 
 
+def case_profile():
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    chrome(d)
+    draw_rich(d, (48, 66), "CASE 04  ·  PROFILE", 13, AMBER)
+    draw_rich(d, (48, 92), "Know what is wrong before you clean anything", 34, FG)
+    draw_rich(d, (48, 140),
+              "Opens read-only, writes no cell, and scores the workbook 30 / 100 with 20 findings.",
+              16, DIM)
+
+    draw_rich(d, (48, 184), "BEFORE  —  what the client sent", 14, WARN)
+    rows = [
+        ["2026 年 3 月 订单明细", "", "", ""],
+        ["", "", "", ""],
+        ["客户编号", "客户名称", "金额", "下单日期"],
+        ["00123", " 客户甲 ", "1,280.50", "2026-03-01"],
+        ["00124", "客户乙", "¥ 1,050 元", "2026/3/2"],
+        ["00125", "赵\u00a0六", "７８０", "05.03.2026"],
+        ["00126", "客户丁", "980", "2026年3月5日"],
+        ["客户编号", "客户名称", "金额", "下单日期"],
+        ["00128", "客户戊", "5400", "20260307"],
+    ]
+    marks = {(0, 0): DIM, (2, 0): BLUE, (2, 1): BLUE, (2, 2): BLUE, (2, 3): BLUE,
+             (3, 3): AMBER, (4, 3): AMBER, (5, 3): AMBER, (6, 3): AMBER,
+             (8, 3): AMBER, (8, 2): AMBER, (4, 2): AMBER, (5, 1): AMBER,
+             (7, 0): WARN, (7, 1): WARN, (7, 2): WARN, (7, 3): WARN}
+    table(d, 48, 200, ["A", "B", "C", "D"], rows, [105, 110, 115, 120],
+          row_h=25, marks=marks, size=13)
+    draw_rich(d, (48, 458), "header on row 3  ·  repeated header  ·  5 date formats", 13, DIM)
+    draw_rich(d, (48, 482), "nbsp  ·  full-width digits  ·  money as text  ·  duplicate row", 13, DIM)
+
+    draw_rich(d, (660, 184), "AFTER  —  _issues sheet, ranked", 14, GREEN)
+    iss = [
+        ["high", "5 date formats in one column", "D"],
+        ["high", "1 date is day/month ambiguous", "D"],
+        ["medium", "8 numbers stored as text", "C"],
+        ["medium", "header repeated inside data", "-"],
+        ["medium", "1 duplicate row", "-"],
+        ["medium", "2 cells with nbsp / full-width", "B"],
+        ["low", "3 blank rows inside the data", "-"],
+        ["low", "1 column has no header", "F"],
+    ]
+    colors = {"high": WARN, "medium": AMBER, "low": DIM}
+    y = 206
+    d.rectangle([660, y, 660 + 500, y + 27], fill=(30, 36, 45))
+    draw_rich(d, (668, y + 6), "severity", 13, DIM)
+    draw_rich(d, (740, y + 6), "finding", 13, DIM)
+    draw_rich(d, (1180, y + 6), "col", 13, DIM)
+    y += 27
+    for sev, txt, col in iss:
+        draw_rich(d, (668, y + 5), sev, 13, colors[sev])
+        draw_rich(d, (740, y + 5), txt, 13, FG)
+        draw_rich(d, (1180, y + 5), col, 13, DIM)
+        d.line([660, y + 26, 1160, y + 26], fill=LINE)
+        y += 27
+    d.rectangle([660, 206, 1160, y], outline=LINE)
+    draw_rich(d, (660, y + 12), "+ _columns sheet: fill rate, types, max length per column", 13, DIM)
+    draw_rich(d, (660, y + 36), "+ _summary sheet: rows, merges, cover pages, score, verdict", 13, DIM)
+
+    stats(d, 552, [("30 / 100", "readiness score"), ("20", "findings"), ("0", "cells written")])
+    footer(d, "profile  ·  read-only by design: the file is opened, never saved back")
+    p = os.path.join(OUT, "case-04-profile.png")
+    img.save(p)
+    return p
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
-    for fn in (case_merge, case_clean, case_split):
+    for fn in (case_merge, case_clean, case_split, case_profile):
         print("wrote", fn())
 
 
